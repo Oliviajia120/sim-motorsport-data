@@ -1,6 +1,37 @@
 import { parseXrk, type XrkChannel, type XrkLog } from "aim-xrk";
+import { downloadCoachingNote, safeStem, type CoachingNote, type NoteChart } from "./lib/coaching-note";
+import {
+  coachingChannelKeys,
+  deltaVsDistance,
+  downsample,
+  equalSplits,
+  formatLap,
+  formatSigned,
+  fractionAtTime,
+  idealSeconds,
+  isCoachingChannel,
+  lapColor,
+  markersForLap,
+  median,
+  moveSpanEdge,
+  parseSavedTemplates,
+  parseSplitDocument,
+  removeSpanEdge,
+  sectorLabel,
+  sectorTableFromSpans,
+  serializeSavedTemplates,
+  serializeSplitDocument,
+  spansFromSplits,
+  spansFromTemplate,
+  timeAtFraction,
+  topSectorLosses,
+  ZIC_TEMPLATE,
+  type MarkerHit,
+  type NamedSector,
+  type Sample,
+  type SavedTemplate,
+} from "./lib/telemetry";
 
-type Sample = { t: number; v: number };
 type LapProfile = {
   num: number;
   startMs: number;
@@ -17,23 +48,13 @@ type PrepChannel = { key: string; label: string; unit: string; scale: number; ch
 type Prepared = {
   fileName: string;
   vehicle: string;
+  rider: string;
+  when: string;
   track: string;
   channels: PrepChannel[];
   laps: LapProfile[];
   distanceNote: string;
 };
-
-const COLORS = ["#e85d04", "#f0c14d", "#3ddc97", "#5eb1ff", "#c084fc", "#fb7185", "#94a3b8", "#f97316"];
-const lapColor = (i: number) => COLORS[i % COLORS.length]!;
-
-function formatLap(seconds: number): string {
-  if (!Number.isFinite(seconds)) return "—";
-  const sign = seconds < 0 ? "−" : "";
-  const abs = Math.abs(seconds);
-  const m = Math.floor(abs / 60);
-  const s = (abs - m * 60).toFixed(3).padStart(6, "0");
-  return m > 0 ? `${sign}${m}:${s}` : `${sign}${s}`;
-}
 
 function isSpeedName(name: string) {
   return /speed/i.test(name) && !/rate|accur|fix/i.test(name);
@@ -347,9 +368,12 @@ function prepare(log: XrkLog, fileName: string, side: "A" | "B" = "A"): Prepared
     laps.push(profile);
   }
   const meta = log.metadata ?? {};
+  const when = [meta["Log Date"], meta["Log Time"]].map((item) => String(item ?? "").trim()).filter(Boolean).join(" ");
   return {
     fileName,
     vehicle: String(meta.Vehicle ?? "—"),
+    rider: String(meta.Driver ?? "").trim() || "—",
+    when,
     track: String(meta.Venue ?? meta.Track ?? "Session"),
     channels,
     laps,
@@ -360,40 +384,6 @@ function prepare(log: XrkLog, fileName: string, side: "A" | "B" = "A"): Prepared
           ? "No usable latitude/longitude. Splits follow distance integrated from speed."
           : "No GPS position or speed, so sectors cannot be placed.",
   };
-}
-
-function timeAtFraction(p: LapProfile, fraction: number) {
-  if (fraction <= 0) return 0;
-  if (fraction >= 1) return p.duration;
-  const target = fraction * p.total;
-  let lo = 0;
-  let hi = p.dist.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (p.dist[mid]! < target) lo = mid + 1;
-    else hi = mid;
-  }
-  if (lo === 0) return p.times[0] ?? 0;
-  const span = p.dist[lo]! - p.dist[lo - 1]!;
-  const u = span > 1e-6 ? (target - p.dist[lo - 1]!) / span : 0;
-  return p.times[lo - 1]! + u * (p.times[lo]! - p.times[lo - 1]!);
-}
-
-function fractionAtTime(p: LapProfile, timeSec: number) {
-  if (timeSec <= 0 || p.total <= 0) return 0;
-  if (timeSec >= p.duration) return 1;
-  let lo = 0;
-  let hi = p.times.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (p.times[mid]! < timeSec) lo = mid + 1;
-    else hi = mid;
-  }
-  if (lo === 0) return 0;
-  const span = p.times[lo]! - p.times[lo - 1]!;
-  const u = span > 1e-6 ? (timeSec - p.times[lo - 1]!) / span : 0;
-  const d = p.dist[lo - 1]! + u * (p.dist[lo]! - p.dist[lo - 1]!);
-  return Math.min(1, Math.max(0, d / p.total));
 }
 
 function nearest(samples: Sample[], t: number) {
@@ -410,23 +400,15 @@ function nearest(samples: Sample[], t: number) {
   return Math.abs(a.t - t) <= Math.abs(b.t - t) ? a.v : b.v;
 }
 
-function downsample(samples: Sample[], maxPoints: number) {
-  if (samples.length <= maxPoints) return samples;
-  const step = samples.length / maxPoints;
-  const out: Sample[] = [];
-  for (let i = 0; i < maxPoints; i++) out.push(samples[Math.floor(i * step)]!);
-  const last = samples[samples.length - 1]!;
-  if (out[out.length - 1] !== last) out.push(last);
-  return out;
-}
-
 type State = {
   log: Prepared | null;
   compare: Prepared | null;
   keys: string[];
   laps: string[];
   anchor: string | null;
-  splits: number[];
+  spans: NamedSector[];
+  templateId: string;
+  lapLengthM: number;
   place: boolean;
   cursor: number | null;
   equal: number;
@@ -434,12 +416,29 @@ type State = {
   grok: boolean;
 };
 
-const state: State = { log: null, compare: null, keys: [], laps: [], anchor: null, splits: [], place: false, cursor: null, equal: 4, drag: null, grok: false };
+const state: State = {
+  log: null,
+  compare: null,
+  keys: [],
+  laps: [],
+  anchor: null,
+  spans: [],
+  templateId: "manual",
+  lapLengthM: 0,
+  place: false,
+  cursor: null,
+  equal: 4,
+  drag: null,
+  grok: false,
+};
+
+const TEMPLATE_STORE = "lap-templates";
 
 type GrokMsg = { role: "user" | "assistant"; content: string };
 const grokChat: GrokMsg[] = [];
 let grokBusy = false;
 let channelQuery = "";
+let templateDraft = "";
 
 const app = document.getElementById("app")!;
 
@@ -479,38 +478,155 @@ function comparedLaps() {
   return full.length ? full : all;
 }
 
-function sectors() {
-  const laps = comparedLaps();
-  if (!state.splits.length || !laps.length) return [];
-  const bounds = [0, ...[...state.splits].sort((a, b) => a - b), 1];
-  const rows = [];
-  for (let s = 0; s < bounds.length - 1; s++) {
-    const from = bounds[s]!;
-    const to = bounds[s + 1]!;
-    const times = laps.map((lap) => timeAtFraction(lap, to) - timeAtFraction(lap, from));
-    let best = Infinity;
-    let bestLap = laps[0]!.id;
-    times.forEach((t, i) => {
-      if (t > 0.05 && t < best) {
-        best = t;
-        bestLap = laps[i]!.id;
-      }
-    });
-    rows.push({ index: s + 1, from, to, times, best, bestLap });
+function loadTemplates(): SavedTemplate[] {
+  try {
+    return parseSavedTemplates(localStorage.getItem(TEMPLATE_STORE));
+  } catch {
+    return [];
   }
-  return rows;
 }
 
-function addSplit(fraction: number) {
-  if (fraction <= 0.015 || fraction >= 0.985) return;
-  if (state.splits.some((s) => Math.abs(s - fraction) < 0.012)) return;
-  state.splits = [...state.splits, fraction].sort((a, b) => a - b);
-  saveSplits();
+function saveTemplateList(list: SavedTemplate[]) {
+  localStorage.setItem(TEMPLATE_STORE, serializeSavedTemplates(list));
 }
 
 function saveSplits() {
   if (!state.log) return;
-  localStorage.setItem("lap-splits:" + state.log.track, JSON.stringify(state.splits));
+  localStorage.setItem(
+    "lap-splits:" + state.log.track,
+    serializeSplitDocument({
+      v: 2,
+      templateId: state.templateId,
+      lapLengthM: state.lapLengthM,
+      spans: state.spans,
+    }),
+  );
+}
+
+function rulerLength() {
+  const pool = comparedLaps();
+  const laps = pool.length ? pool : everyLap();
+  return median(laps.map((lap) => lap.total));
+}
+
+function applyTemplateId(id: string) {
+  if (id === "manual") {
+    state.templateId = "manual";
+    state.spans = spansFromSplits(state.spans.slice(0, -1).map((span) => span.to));
+    if (!state.lapLengthM) state.lapLengthM = rulerLength();
+    saveSplits();
+    return;
+  }
+  if (id === "zic") {
+    const length = rulerLength();
+    if (length < 200) return;
+    const placed = spansFromTemplate(ZIC_TEMPLATE, length);
+    state.templateId = "zic";
+    state.spans = placed.spans;
+    state.lapLengthM = placed.lapLengthM;
+    saveSplits();
+    return;
+  }
+  if (id.startsWith("saved:")) {
+    const found = loadTemplates().find((item) => item.name === id.slice(6));
+    if (!found) return;
+    state.templateId = id;
+    state.spans = found.spans.map((span) => ({ ...span }));
+    state.lapLengthM = found.lapLengthM || rulerLength();
+    saveSplits();
+  }
+}
+
+function sectorRows(laps: LapProfile[]) {
+  if (!state.spans.length || !laps.length) return [];
+  return sectorTableFromSpans(laps, state.spans);
+}
+
+function sectors() {
+  return sectorRows(comparedLaps());
+}
+
+function addSplit(fraction: number) {
+  if (state.templateId !== "manual") return;
+  if (fraction <= 0.015 || fraction >= 0.985) return;
+  const edges = state.spans.slice(0, -1).map((span) => span.to);
+  if (edges.some((edge) => Math.abs(edge - fraction) < 0.012)) return;
+  state.spans = spansFromSplits([...edges, fraction]);
+  saveSplits();
+}
+
+function reviewPair(): { ref: LapProfile; laps: LapProfile[]; implicit: boolean } | null {
+  const selected = chosen();
+  const anchor = anchorLap();
+  if (!anchor || !selected.length) return null;
+  const others = selected.filter((lap) => lap.id !== anchor.id);
+  if (others.length) return { ref: anchor, laps: others, implicit: false };
+  const pool = comparedLaps().filter((lap) => lap.id !== anchor.id);
+  if (!pool.length) return null;
+  return { ref: fastest(pool), laps: [anchor], implicit: true };
+}
+
+function referenceIndex(laps: LapProfile[]): number {
+  const pair = reviewPair();
+  if (pair) {
+    const index = laps.findIndex((lap) => lap.id === pair.ref.id);
+    if (index >= 0) return index;
+  }
+  if (!laps.length) return -1;
+  let best = 0;
+  laps.forEach((lap, index) => {
+    if (lap.duration < laps[best]!.duration) best = index;
+  });
+  return best;
+}
+
+function distanceText(span: NamedSector): string {
+  const length = state.lapLengthM > 0 ? state.lapLengthM : rulerLength();
+  if (length > 0 && state.templateId !== "manual") {
+    return `${Math.round(span.from * length)}–${Math.round(span.to * length)} m`;
+  }
+  return `${(span.from * 100).toFixed(0)}–${(span.to * 100).toFixed(0)}%`;
+}
+
+function listWords(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  if (items.length === 2) return `${items[0]} or ${items[1]}`;
+  return `${items.slice(0, -1).join(", ")}, or ${items[items.length - 1]}`;
+}
+
+function templateLabel(): string {
+  if (state.templateId === "zic") return "ZIC C1–C11";
+  if (state.templateId.startsWith("saved:")) return state.templateId.slice(6);
+  return "Manual splits";
+}
+
+function lapChannel(lap: LapProfile, key: string | undefined): PrepChannel | undefined {
+  if (!key) return undefined;
+  const source = lap.side === "B" ? state.compare : state.log;
+  return source?.channels.find((channel) => channel.key === key);
+}
+
+function markerMap(laps: LapProfile[]): Map<string, MarkerHit[]> {
+  const map = new Map<string, MarkerHit[]>();
+  if (!state.spans.some((span) => span.kind === "corner")) return map;
+  const keys = coachingChannelKeys(state.log?.channels ?? []);
+  for (const lap of laps) {
+    const brake = lapChannel(lap, keys.brake);
+    const speed = lapChannel(lap, keys.speed);
+    const lean = lapChannel(lap, keys.lean);
+    map.set(
+      lap.id,
+      markersForLap(lap, state.spans, {
+        brake: brake ? sliceChannel(brake.channel, lap.startMs, lap.endMs) : null,
+        brakeUnit: brake?.unit ?? "",
+        speed: speed ? sliceChannel(speed.channel, lap.startMs, lap.endMs) : null,
+        speedScale: speed?.scale ?? 1,
+        lean: lean ? sliceChannel(lean.channel, lap.startMs, lap.endMs) : null,
+        leanScale: lean?.scale ?? 1,
+      }),
+    );
+  }
+  return map;
 }
 
 function sessionBrief() {
@@ -527,10 +643,19 @@ function sessionBrief() {
   if (!rows.length) lines.push("No splits are set, so there is no theoretical best yet.");
   else {
     const ideal = rows.every((r) => Number.isFinite(r.best)) ? rows.reduce((s, r) => s + r.best, 0) : NaN;
+    lines.push(`Template: ${templateLabel()}`);
     lines.push(`Theoretical best: ${formatLap(ideal)}`);
+    const refIndex = referenceIndex(laps);
     for (const row of rows) {
-      const each = laps.map((l, i) => `${lapName(l)} ${formatLap(row.times[i]!)}`).join(", ");
-      lines.push(`S${row.index} ${(row.from * 100).toFixed(0)}-${(row.to * 100).toFixed(0)}% best ${formatLap(row.best)} from ${nameOfId(row.bestLap)}. ${each}`);
+      const each = laps
+        .map((lap, index) => {
+          const time = row.times[index]!;
+          const delta =
+            refIndex >= 0 && index !== refIndex ? ` (${formatSigned(time - row.times[refIndex]!)} vs ${lapName(laps[refIndex]!)})` : "";
+          return `${lapName(lap)} ${formatLap(time)}${delta}`;
+        })
+        .join(", ");
+      lines.push(`${sectorLabel(row)} ${distanceText(row)} best ${formatLap(row.best)} from ${nameOfId(laps[row.bestIndex]!.id)}. ${each}`);
     }
   }
   lines.push("Checked channels. Numbers are min/avg/max in display units. Sector figures are min/avg/max inside that sector.");
@@ -651,8 +776,8 @@ function render() {
   const log = state.log;
   if (!log) {
     app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open file</button></header>
-      <main class="empty"><h2>Sectors, then the ideal lap</h2>
-      <p>Open an AIM .xrk or a Dragy .vbo. Drop splits along the lap, and the ideal time is the sum of the fastest pass through each sector.</p>
+      <main class="empty"><h2>A coach desk for the lap</h2>
+      <p>Open an AIM .xrk or a Dragy .vbo. Apply the ZIC C1–C11 template, or drop your own splits. The ideal time is the sum of the fastest pass through each sector.</p>
       <button id="open2">Choose a file</button></main>`;
     document.getElementById("open")!.onclick = pick;
     document.getElementById("open2")!.onclick = pick;
@@ -662,12 +787,26 @@ function render() {
   const session = comparedLaps();
   const anchor = anchorLap();
   const rows = sectors();
-  const ideal = rows.length && rows.every((r) => Number.isFinite(r.best)) ? rows.reduce((s, r) => s + r.best, 0) : NaN;
+  const ideal = rows.length && rows.every((r) => Number.isFinite(r.best)) ? idealSeconds(rows) : NaN;
   const bestActual = session.length ? Math.min(...session.map((l) => l.duration)) : NaN;
   const delta = ideal - bestActual;
-  const makeup = rows.map((r) => `S${r.index} ${formatLap(r.best)} from ${nameOfId(r.bestLap)}`).join("  +  ");
+  const cornerCount = rows.filter((row) => row.kind === "corner").length;
+  const makeup = !rows.length
+    ? ""
+    : cornerCount
+      ? `${templateLabel()} · fastest sector from any full lap, straights included`
+      : rows.map((row) => `${sectorLabel(row)} ${formatLap(row.best)} from ${nameOfId(session[row.bestIndex]!.id)}`).join("  +  ");
   const skipped = everyLap().length - session.length;
-  const deltaText = !rows.length ? "Add at least one split" : !Number.isFinite(delta) ? "" : delta < -0.0005 ? `${formatLap(delta)} vs best lap` : delta > 0.0005 ? `+${formatLap(delta)} vs best lap` : "matches the best lap";
+  const deltaText = !rows.length ? "Apply ZIC or add a split" : !Number.isFinite(delta) ? "" : delta < -0.0005 ? `${formatLap(delta)} vs best lap` : delta > 0.0005 ? `+${formatLap(delta)} vs best lap` : "matches the best lap";
+  const who = [log.rider !== "—" ? log.rider : "", log.vehicle !== "—" ? log.vehicle : "", log.track].filter(Boolean).join(" · ");
+  const coach = coachingChannelKeys(log.channels);
+  const missingCoach = [coach.brake ? "" : "brake", coach.throttle ? "" : "throttle", coach.lean ? "" : "lean"].filter(Boolean);
+  const savedTemplates = loadTemplates();
+  const templateOptions = [
+    `<option value="manual">Manual splits</option>`,
+    `<option value="zic">ZIC C1–C11</option>`,
+    ...savedTemplates.map((item) => `<option value="saved:${esc(item.name)}">${esc(item.name)}</option>`),
+  ].join("");
 
   app.innerHTML = `
     <header class="bar">
@@ -675,7 +814,7 @@ function render() {
       <button id="open">Open file</button>
       <button id="compare">${state.compare ? "Remove compare" : "Compare file"}</button>
       <button id="grok">Grok</button>
-      <span class="meta">${log.fileName}${state.compare ? " vs " + state.compare.fileName : ""} · ${log.vehicle} · ${log.track}</span>
+      <span class="meta">${esc(log.fileName)}${state.compare ? " vs " + esc(state.compare.fileName) : ""} · ${esc(who)}</span>
     </header>
     <div class="layout">
       <aside>
@@ -695,18 +834,30 @@ function render() {
               <div class="sub">${rows.length ? `Best full lap ${formatLap(bestActual)} · ${deltaText} · ${session.length} laps` : ""}${skipped > 0 ? ` · ${skipped} short lap${skipped === 1 ? "" : "s"} left out` : ""}</div>
             </div>
             <div class="tools">
+              <label class="tmpl">Track <select id="template">${templateOptions}</select></label>
+              <button id="apply" class="go">Apply</button>
+              <input id="tpl-name" class="tplname" placeholder="Save template" maxlength="40" value="${esc(templateDraft)}">
+              <button id="save-tpl">Save</button>
+              <button id="export-png">Export PNG</button>
+              <button id="export-pdf">Export PDF</button>
               <button id="place" class="${state.place ? "on" : ""}">${state.place ? "Click a graph to drop a split" : "Place on graph"}</button>
               <label>Equal <input id="equal" type="number" min="2" max="12" value="${state.equal}"></label>
               <button id="divide">Divide lap</button>
               <button id="clear">Clear</button>
             </div>
           </div>
-          <p class="sub">${log.distanceNote}</p>
+          <p class="sub">${log.distanceNote} ${state.templateId === "manual" ? "Manual splits are a percentage of the lap." : `${esc(templateLabel())} is placed on a ${Math.round(state.lapLengthM || rulerLength()).toLocaleString("en-US")} m lap.`}</p>
           <div id="bar" class="splitbar"></div>
           <div id="chips" class="chips"></div>
-          <p class="hint">Click the bar to add a split. Drag a marker to move it. ${state.compare ? "File B laps are the dashed lines. The theoretical best can use a sector from either file." : "The theoretical best uses every full lap in this session, not only the laps drawn on the graph."}</p>
+          <p class="hint">${state.templateId === "manual" ? "Click the bar to add a split. Drag a marker to move it." : "Drag a marker to edit this corner map. Apply Manual splits to go back to percentage sectors."} ${state.compare ? "File B laps are the dashed lines. The theoretical best can use a sector from either file." : "The theoretical best uses every full lap in this session, not only the laps drawn on the graph."}</p>
           <div id="table"></div>
         </section>
+        <section class="card delta-card">
+          <div class="kicker">Time delta vs distance</div>
+          <p id="delta-legend" class="hint">Positive is behind the reference (lost time). Negative is ahead of the reference (gained time).</p>
+          <div id="delta" class="delta-plot"></div>
+        </section>
+        <p class="hint">${missingCoach.length ? `Coaching overlays look for brake, throttle, and lean. This file has no ${listWords(missingCoach)} channel.` : "Brake, throttle, and lean are the default overlays. ▲ brake on, ◆ apex."}</p>
         <p id="readout" class="readout"><span class="hint">Move across a graph. Channel values line up here.</span></p>
         <div id="plots"></div>
       </main>
@@ -744,15 +895,39 @@ function render() {
   (document.getElementById("equal") as HTMLInputElement).onchange = (e) => {
     state.equal = Number((e.target as HTMLInputElement).value) || 4;
   };
+  const templateSelect = document.getElementById("template") as HTMLSelectElement;
+  templateSelect.value = state.templateId;
+  document.getElementById("apply")!.onclick = () => {
+    applyTemplateId(templateSelect.value);
+    render();
+  };
+  const nameInput = document.getElementById("tpl-name") as HTMLInputElement;
+  nameInput.oninput = () => {
+    templateDraft = nameInput.value;
+  };
+  document.getElementById("save-tpl")!.onclick = () => {
+    const name = nameInput.value.trim().slice(0, 40);
+    if (!name || !state.spans.length) return;
+    const next = loadTemplates().filter((item) => item.name !== name);
+    next.push({ name, spans: state.spans.map((span) => ({ ...span })), lapLengthM: state.lapLengthM || rulerLength() });
+    saveTemplateList(next);
+    state.templateId = `saved:${name}`;
+    templateDraft = "";
+    saveSplits();
+    render();
+  };
+  document.getElementById("export-png")!.onclick = () => void exportNote("png");
+  document.getElementById("export-pdf")!.onclick = () => void exportNote("pdf");
   document.getElementById("divide")!.onclick = () => {
-    const n = Math.max(2, Math.min(12, state.equal));
-    state.splits = [];
-    for (let i = 1; i < n; i++) state.splits.push(i / n);
+    state.templateId = "manual";
+    state.spans = spansFromSplits(equalSplits(state.equal));
+    if (!state.lapLengthM) state.lapLengthM = rulerLength();
     saveSplits();
     render();
   };
   document.getElementById("clear")!.onclick = () => {
-    state.splits = [];
+    state.templateId = "manual";
+    state.spans = [];
     saveSplits();
     render();
   };
@@ -809,60 +984,89 @@ function render() {
   if (state.compare) paintLaps(state.compare.fileName, state.compare.laps);
 
   const bar = document.getElementById("bar")!;
-  const sorted = [...state.splits].sort((a, b) => a - b);
-  bar.innerHTML = `<div class="track"></div>` + sorted.map((f, i) => `<div class="mark" style="left:${f * 100}%"><b></b><span>${i + 1}</span></div>`).join("");
+  const zones = state.spans
+    .filter((span) => span.kind === "corner")
+    .map((span) => `<div class="zone" style="left:${span.from * 100}%;width:${Math.max(0, span.to - span.from) * 100}%"><span>${esc(span.label)}</span></div>`)
+    .join("");
+  const marks = state.spans
+    .slice(0, -1)
+    .map((span, index) => `<div class="mark" data-edge="${index}" style="left:${span.to * 100}%"><b></b><span>${esc(span.kind === "plain" ? String(index + 1) : "")}</span></div>`)
+    .join("");
+  bar.innerHTML = `<div class="track"></div>${zones}${marks}`;
   const fracOf = (e: PointerEvent) => {
     const r = bar.getBoundingClientRect();
     return Math.min(0.99, Math.max(0.01, (e.clientX - r.left) / Math.max(r.width, 1)));
   };
+  const edgeAt = (fraction: number) => {
+    let hit = -1;
+    let best = 0.014;
+    state.spans.forEach((span, index) => {
+      if (index >= state.spans.length - 1) return;
+      const distance = Math.abs(span.to - fraction);
+      if (distance < best) {
+        best = distance;
+        hit = index;
+      }
+    });
+    return hit;
+  };
   bar.onpointerdown = (e) => {
-    const f = fracOf(e);
-    const hit = state.splits.findIndex((s) => Math.abs(s - f) < 0.018);
+    const fraction = fracOf(e);
+    const hit = edgeAt(fraction);
     if (hit >= 0) {
       state.drag = hit;
       bar.setPointerCapture(e.pointerId);
       return;
     }
-    addSplit(f);
+    addSplit(fraction);
     render();
   };
   bar.onpointermove = (e) => {
     if (state.drag == null) return;
-    const f = fracOf(e);
-    state.splits[state.drag] = f;
-    const marks = bar.querySelectorAll<HTMLElement>(".mark");
-    const order = [...state.splits.keys()].sort((a, b) => state.splits[a]! - state.splits[b]!);
-    order.forEach((idx, visual) => {
-      const el = marks[visual];
-      if (!el) return;
-      el.style.left = `${state.splits[idx]! * 100}%`;
+    state.spans = moveSpanEdge(state.spans, state.drag, fracOf(e));
+    const nodes = bar.querySelectorAll<HTMLElement>(".mark");
+    state.spans.slice(0, -1).forEach((span, index) => {
+      const node = nodes[index];
+      if (node) node.style.left = `${span.to * 100}%`;
     });
   };
   bar.onpointerup = () => {
     if (state.drag == null) return;
     state.drag = null;
-    state.splits = [...state.splits].sort((a, b) => a - b);
     saveSplits();
     render();
   };
 
   const chips = document.getElementById("chips")!;
-  sorted.forEach((f, order) => {
-    const btn = document.createElement("button");
-    btn.textContent = `S${order + 1} ${(f * 100).toFixed(0)}% remove`;
-    btn.onclick = () => {
-      state.splits = state.splits.filter((s) => s !== f);
-      saveSplits();
-      render();
-    };
-    chips.appendChild(btn);
-  });
+  if (state.templateId === "manual") {
+    state.spans.slice(0, -1).forEach((span, edge) => {
+      const btn = document.createElement("button");
+      btn.textContent = `${span.label} ${(span.to * 100).toFixed(0)}% remove`;
+      btn.onclick = () => {
+        state.spans = removeSpanEdge(state.spans, edge);
+        state.templateId = "manual";
+        saveSplits();
+        render();
+      };
+      chips.appendChild(btn);
+    });
+  } else {
+    for (const span of state.spans) {
+      if (span.kind !== "corner") continue;
+      const chip = document.createElement("span");
+      chip.className = "chip";
+      chip.textContent = `${sectorLabel(span)} ${distanceText(span)}`;
+      chips.appendChild(chip);
+    }
+  }
 
   const xMax = laps.length ? Math.max(...laps.map((l) => l.duration)) : 60;
-  const splitTimes = anchor ? [...state.splits].sort((a, b) => a - b).map((f) => timeAtFraction(anchor, f)) : [];
+  const splitTimes = anchor ? state.spans.slice(0, -1).map((span) => timeAtFraction(anchor, span.to)) : [];
+  const marksByLap = markerMap(laps);
   const plots = document.getElementById("plots")!;
   const shown = state.keys.map((k) => log.channels.find((c) => c.key === k)).filter((c): c is PrepChannel => !!c).slice(0, 8);
   const anchorIndex = anchor ? laps.findIndex((l) => l.id === anchor.id) : -1;
+  type PlotMarker = { t: number; color: string; kind: "brake" | "apex"; lane: number };
   type Drawn = {
     canvas: HTMLCanvasElement;
     wrap: HTMLElement;
@@ -871,6 +1075,7 @@ function render() {
     series: { color: string; samples: Sample[]; scale: number; dash?: boolean }[];
     anchorSamples: Sample[] | null;
     scale: number;
+    markers: PlotMarker[];
   };
   const drawn: Drawn[] = [];
   const timeOf = (e: PointerEvent, canvas: HTMLCanvasElement) => {
@@ -906,9 +1111,10 @@ function render() {
       const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
       const v = raw * p.scale;
       const text = Number.isFinite(v) ? v.toFixed(1) : "—";
-      draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t, text);
+      draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t, text, p.markers);
     }
   };
+  paintDelta(laps);
   for (const ch of shown) {
     const wrap = document.createElement("div");
     wrap.className = "plot";
@@ -924,6 +1130,12 @@ function render() {
         scale: src?.scale ?? ch.scale,
       };
     });
+    const coachTrace = isCoachingChannel(ch) || isSpeedName(ch.key) || isSpeedName(ch.label);
+    const plotMarkers: PlotMarker[] = coachTrace
+      ? laps.flatMap((lap, lane) =>
+          (marksByLap.get(lap.id) ?? []).map((hit) => ({ t: hit.t, color: colorOf(lap), kind: hit.kind, lane })),
+        )
+      : [];
     const item: Drawn = {
       canvas,
       wrap,
@@ -932,13 +1144,14 @@ function render() {
       series,
       anchorSamples: anchorIndex >= 0 ? series[anchorIndex]!.samples : null,
       scale: ch.scale,
+      markers: plotMarkers,
     };
     drawn.push(item);
     const startValue = state.cursor == null || !item.anchorSamples ? "" : (() => {
       const raw = nearest(item.anchorSamples, state.cursor) * item.scale;
       return Number.isFinite(raw) ? raw.toFixed(1) : "";
     })();
-    draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor, startValue);
+    draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor, startValue, plotMarkers);
     wrap.onpointermove = (e) => {
       const t = timeOf(e, canvas);
       if (t == null) return;
@@ -955,13 +1168,24 @@ function render() {
   }
 
   if (rows.length && session.length) {
-    const head = `<tr><th>Sector</th><th>Track</th>${session.map((l) => `<th>${lapName(l)}</th>`).join("")}<th>Best</th></tr>`;
+    const refIdx = referenceIndex(session);
+    const head = `<tr><th>Sector</th><th>Distance</th>${session.map((l) => `<th>${lapName(l)}${session[refIdx]?.id === l.id ? " ref" : ""}</th>`).join("")}<th>Best</th></tr>`;
     const body = rows
       .map((row) => {
         const cells = row.times
-          .map((t, i) => `<td class="${session[i]!.id === row.bestLap ? "best" : ""}">${formatLap(t)}</td>`)
+          .map((t, i) => {
+            const won = i === row.bestIndex;
+            let extra = "";
+            if (refIdx >= 0 && i !== refIdx && Number.isFinite(t) && Number.isFinite(row.times[refIdx])) {
+              const gap = t - row.times[refIdx]!;
+              const tone = gap > 0.0005 ? "loss" : gap < -0.0005 ? "gain" : "";
+              const word = gap > 0.0005 ? "behind" : gap < -0.0005 ? "ahead" : "level";
+              extra = `<span class="d ${tone}">${formatSigned(gap)} ${word}</span>`;
+            }
+            return `<td class="${won ? "best" : ""}">${formatLap(t)}${extra}</td>`;
+          })
           .join("");
-        return `<tr><td>S${row.index}</td><td>${(row.from * 100).toFixed(0)}–${(row.to * 100).toFixed(0)}%</td>${cells}<td class="best">${nameOfId(row.bestLap)} ${formatLap(row.best)}</td></tr>`;
+        return `<tr class="${row.kind}"><td>${esc(sectorLabel(row))}</td><td>${distanceText(row)}</td>${cells}<td class="best">${nameOfId(session[row.bestIndex]!.id)} ${formatLap(row.best)}</td></tr>`;
       })
       .join("");
     const foot = `<tr class="foot"><td colspan="2">Theoretical best</td>${session.map((l) => `<td>${formatLap(l.duration)}</td>`).join("")}<td class="best">${formatLap(ideal)}</td></tr>`;
@@ -1005,6 +1229,7 @@ function draw(
   splitTimes: number[],
   cursor: number | null,
   cursorText: string,
+  markers: { t: number; color: string; kind: "brake" | "apex"; lane: number }[] = [],
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -1093,6 +1318,24 @@ function draw(
     ctx.stroke();
   }
   ctx.setLineDash([]);
+  for (const marker of markers) {
+    const x = xOf(marker.t);
+    if (x < pad.l || x > width - pad.r) continue;
+    const y = pad.t + 7 + marker.lane * 8;
+    ctx.fillStyle = marker.color;
+    ctx.beginPath();
+    if (marker.kind === "brake") {
+      ctx.moveTo(x, y + 6);
+      ctx.lineTo(x - 4, y - 2);
+      ctx.lineTo(x + 4, y - 2);
+    } else {
+      ctx.moveTo(x, y - 4);
+      ctx.lineTo(x + 4, y);
+      ctx.lineTo(x, y + 4);
+      ctx.lineTo(x - 4, y);
+    }
+    ctx.fill();
+  }
   if (cursor != null) {
     const x = xOf(cursor);
     ctx.strokeStyle = "#ffffff";
@@ -1118,6 +1361,307 @@ function draw(
   ctx.fillStyle = "#e7ebef";
   ctx.font = "600 12px sans-serif";
   ctx.fillText(unit ? `${title}  ·  ${unit}` : title, pad.l, 14);
+}
+
+function drawDelta(
+  canvas: HTMLCanvasElement,
+  wrap: HTMLElement,
+  series: { name: string; color: string; dash?: boolean; points: { metres: number; delta: number }[] }[],
+  metresMax: number,
+  bands: { from: number; to: number }[],
+) {
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const width = wrap.clientWidth || 800;
+  const height = 210;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  canvas.style.width = "100%";
+  canvas.style.height = height + "px";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  const pad = { l: 52, r: 12, t: 22, b: 26 };
+  const plotW = Math.max(1, width - pad.l - pad.r);
+  const plotH = Math.max(1, height - pad.t - pad.b);
+  ctx.fillStyle = "#181b1f";
+  ctx.fillRect(0, 0, width, height);
+  let yMin = 0;
+  let yMax = 0;
+  for (const line of series) {
+    for (const point of line.points) {
+      if (point.delta < yMin) yMin = point.delta;
+      if (point.delta > yMax) yMax = point.delta;
+    }
+  }
+  if (yMax - yMin < 0.05) {
+    yMin -= 0.05;
+    yMax += 0.05;
+  }
+  const slack = (yMax - yMin) * 0.12;
+  yMin -= slack;
+  yMax += slack;
+  const xOf = (metres: number) => pad.l + (metres / Math.max(metresMax, 1)) * plotW;
+  const yOf = (value: number) => pad.t + (1 - (value - yMin) / (yMax - yMin)) * plotH;
+  ctx.fillStyle = "rgba(232,93,4,0.10)";
+  for (const band of bands) {
+    const x0 = xOf(band.from);
+    const x1 = xOf(band.to);
+    ctx.fillRect(x0, pad.t, Math.max(1, x1 - x0), plotH);
+  }
+  ctx.strokeStyle = "#2a3036";
+  ctx.font = "11px ui-monospace, monospace";
+  ctx.fillStyle = "#8e98a3";
+  for (let i = 0; i <= 4; i++) {
+    const value = yMax - ((yMax - yMin) * i) / 4;
+    const y = pad.t + (plotH * i) / 4;
+    ctx.beginPath();
+    ctx.moveTo(pad.l, y);
+    ctx.lineTo(width - pad.r, y);
+    ctx.stroke();
+    ctx.fillText(value.toFixed(2), 4, y + 3);
+  }
+  const primary = series[0];
+  if (primary) {
+    for (let i = 1; i < primary.points.length; i++) {
+      const left = primary.points[i - 1]!;
+      const right = primary.points[i]!;
+      const pieces: [{ metres: number; delta: number }, { metres: number; delta: number }][] = [];
+      if (left.delta * right.delta < 0) {
+        const u = left.delta / (left.delta - right.delta);
+        const cross = { metres: left.metres + u * (right.metres - left.metres), delta: 0 };
+        pieces.push([left, cross], [cross, right]);
+      } else pieces.push([left, right]);
+      for (const [a, b] of pieces) {
+        ctx.fillStyle = a.delta + b.delta >= 0 ? "rgba(251,113,133,0.28)" : "rgba(61,220,151,0.28)";
+        ctx.beginPath();
+        ctx.moveTo(xOf(a.metres), yOf(a.delta));
+        ctx.lineTo(xOf(b.metres), yOf(b.delta));
+        ctx.lineTo(xOf(b.metres), yOf(0));
+        ctx.lineTo(xOf(a.metres), yOf(0));
+        ctx.fill();
+      }
+    }
+  }
+  ctx.strokeStyle = "#f0c14d";
+  ctx.setLineDash([4, 3]);
+  ctx.beginPath();
+  ctx.moveTo(pad.l, yOf(0));
+  ctx.lineTo(width - pad.r, yOf(0));
+  ctx.stroke();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#8e98a3";
+  ctx.font = "11px sans-serif";
+  ctx.fillText("behind", pad.l + 6, yOf(0) - 6);
+  ctx.fillText("ahead", pad.l + 6, yOf(0) + 14);
+  ctx.save();
+  ctx.beginPath();
+  ctx.rect(pad.l, pad.t, plotW, plotH);
+  ctx.clip();
+  for (const line of series) {
+    ctx.beginPath();
+    ctx.strokeStyle = line.color;
+    ctx.lineWidth = 1.8;
+    ctx.setLineDash(line.dash ? [5, 3] : []);
+    let started = false;
+    for (const point of line.points) {
+      const x = xOf(point.metres);
+      const y = yOf(point.delta);
+      if (!started) {
+        ctx.moveTo(x, y);
+        started = true;
+      } else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
+  ctx.restore();
+  ctx.setLineDash([]);
+  ctx.fillStyle = "#e7ebef";
+  ctx.font = "600 12px sans-serif";
+  ctx.fillText("Time delta  ·  s", pad.l, 14);
+  ctx.fillStyle = "#8e98a3";
+  ctx.font = "11px ui-monospace, monospace";
+  ctx.fillText("0 m", pad.l, height - 8);
+  const end = `${Math.round(metresMax)} m`;
+  ctx.fillText(end, width - pad.r - ctx.measureText(end).width, height - 8);
+}
+
+function paintDelta(drawnLaps: LapProfile[]) {
+  const host = document.getElementById("delta");
+  const legend = document.getElementById("delta-legend");
+  if (!host) return;
+  const pair = reviewPair();
+  if (!pair || !drawnLaps.length) {
+    host.innerHTML = `<p class="hint">Check two laps, or one lap, to plot time gained and lost against the reference.</p>`;
+    return;
+  }
+  const ref = pair.ref;
+  const compares = pair.laps;
+  const intro = pair.implicit
+    ? `Reference is ${lapName(ref)}, the best other full lap. ${compares.map(lapName).join(", ")} is the lap being reviewed.`
+    : `Reference is ${lapName(ref)}. Comparing ${compares.map(lapName).join(", ")}.`;
+  if (legend) {
+    legend.textContent = `${intro} Positive is behind the reference (lost time). Negative is ahead of the reference (gained time). Shaded bands are the named corners.`;
+  }
+  const canvas = document.createElement("canvas");
+  host.replaceChildren(canvas);
+  const series = compares.map((lap) => ({
+    name: lapName(lap),
+    color: colorOf(lap),
+    dash: lap.side === "B",
+    points: deltaVsDistance(ref, lap, 280),
+  }));
+  const bands = state.spans
+    .filter((span) => span.kind === "corner")
+    .map((span) => ({ from: span.from * ref.total, to: span.to * ref.total }));
+  drawDelta(canvas, host, series, ref.total, bands);
+  host.onpointermove = (event) => {
+    const rect = canvas.getBoundingClientRect();
+    const plotW = rect.width - 64;
+    if (plotW <= 0 || !legend) return;
+    const x = Math.min(plotW, Math.max(0, event.clientX - rect.left - 52));
+    const metres = (x / plotW) * ref.total;
+    const fraction = ref.total > 0 ? metres / ref.total : 0;
+    const bits = compares.map((lap) => {
+      const gap = timeAtFraction(lap, fraction) - timeAtFraction(ref, fraction);
+      const word = gap > 0.0005 ? "behind" : gap < -0.0005 ? "ahead" : "level";
+      return `${lapName(lap)} ${formatSigned(gap)} s ${word}`;
+    });
+    legend.textContent = `${Math.round(metres)} m along ${lapName(ref)} · ${bits.join(" · ")}. Positive is behind. Negative is ahead.`;
+  };
+}
+
+function exportLaps(): LapProfile[] {
+  const pair = reviewPair();
+  if (pair) return [pair.ref, ...pair.laps.filter((lap) => lap.id !== pair.ref.id)].slice(0, 4);
+  const session = comparedLaps();
+  if (!session.length) return chosen().slice(0, 4);
+  const ref = fastest(session);
+  return [ref, ...session.filter((lap) => lap.id !== ref.id)].slice(0, 4);
+}
+
+function channelChart(laps: LapProfile[], key: string | undefined): NoteChart | null {
+  if (!key || !laps.length) return null;
+  const xMax = Math.max(...laps.map((lap) => lap.duration), 1);
+  let title = "";
+  let unit = "";
+  const series = laps.flatMap((lap) => {
+    const channel = lapChannel(lap, key);
+    if (!channel) return [];
+    title = title || channel.label;
+    unit = unit || channel.unit;
+    const samples = downsample(sliceChannel(channel.channel, lap.startMs, lap.endMs), 420);
+    return [
+      {
+        name: lapName(lap),
+        color: colorOf(lap),
+        dash: lap.side === "B",
+        points: samples.map((sample) => ({ x: sample.t, y: sample.v * channel.scale })),
+      },
+    ];
+  });
+  if (!series.length) return null;
+  const marks = markerMap(laps);
+  return {
+    title,
+    unit,
+    xLabel: `${xMax.toFixed(0)} s`,
+    xMax,
+    series,
+    markers: laps.flatMap((lap, lane) =>
+      (marks.get(lap.id) ?? []).map((hit) => ({ x: hit.t, color: colorOf(lap), kind: hit.kind, lane })),
+    ),
+  };
+}
+
+async function exportNote(kind: "png" | "pdf") {
+  const log = state.log;
+  if (!log) return;
+  const laps = exportLaps();
+  if (!laps.length) {
+    alert("Open a session with at least one lap first.");
+    return;
+  }
+  const ref = laps[0]!;
+  const compare = laps[1];
+  const allRows = sectorTableFromSpans(laps, state.spans);
+  const tableRows = allRows.some((row) => row.kind === "corner") ? allRows.filter((row) => row.kind === "corner") : allRows;
+  const word = (gap: number) => (gap > 0.0005 ? "behind" : gap < -0.0005 ? "ahead" : "level");
+  const tone = (gap: number): "gain" | "loss" | "plain" => (gap > 0.0005 ? "loss" : gap < -0.0005 ? "gain" : "plain");
+  const sessionRows = sectors();
+  const ideal =
+    sessionRows.length && sessionRows.every((row) => Number.isFinite(row.best)) ? formatLap(idealSeconds(sessionRows)) : "";
+  const losses = compare ? topSectorLosses(allRows, 0, 1, 3) : [];
+  const coach = coachingChannelKeys(log.channels);
+  const charts: NoteChart[] = [];
+  const missing = [coach.brake ? "" : "brake", coach.throttle ? "" : "throttle", coach.lean ? "" : "lean"].filter(Boolean);
+  if (compare) {
+    charts.push({
+      title: `Time delta vs ${lapName(ref)}`,
+      unit: "s",
+      xLabel: `${Math.round(ref.total)} m`,
+      xMax: ref.total,
+      zeroLine: true,
+      fillToZero: true,
+      bands: state.spans
+        .filter((span) => span.kind === "corner")
+        .map((span) => ({ from: span.from * ref.total, to: span.to * ref.total, label: span.label })),
+      series: laps.slice(1).map((lap) => ({
+        name: lapName(lap),
+        color: colorOf(lap),
+        dash: lap.side === "B",
+        points: deltaVsDistance(ref, lap, 300).map((point) => ({ x: point.metres, y: point.delta })),
+      })),
+    });
+  }
+  for (const key of [coach.brake, coach.throttle, coach.lean]) {
+    const chart = channelChart(laps, key);
+    if (chart) charts.push(chart);
+  }
+  if (charts.length < 3) {
+    const speed = channelChart(laps, coach.speed);
+    if (speed) charts.push(speed);
+  }
+  const note: CoachingNote = {
+    track: log.track,
+    rider: log.rider,
+    vehicle: log.vehicle,
+    fileName: state.compare ? `${log.fileName} vs ${state.compare.fileName}` : log.fileName,
+    when: log.when,
+    template: templateLabel(),
+    ideal,
+    laps: laps.map((lap, index) => {
+      const gap = lap.duration - ref.duration;
+      return {
+        name: lapName(lap),
+        time: formatLap(lap.duration),
+        color: colorOf(lap),
+        role: index === 0 ? "Reference" : `${formatSigned(gap)} s ${word(gap)} on the full lap`,
+      };
+    }),
+    sectorHeaders: laps.map((lap, index) => (index === 0 ? `${lapName(lap)} ref` : lapName(lap))),
+    sectors: tableRows.map((row) => ({
+      label: sectorLabel(row),
+      distance: distanceText(row),
+      cells: row.times.map((time, index) => {
+        if (index === 0) return { text: formatLap(time), delta: "", tone: "ref" as const };
+        const gap = time - row.times[0]!;
+        return { text: formatLap(time), delta: `${formatSigned(gap)} ${word(gap)}`, tone: tone(gap) };
+      }),
+    })),
+    lossesTitle: compare ? `Top time lost by ${lapName(compare)} vs ${lapName(ref)}` : "Top time lost",
+    losses: losses.map((item) => ({
+      label: sectorLabel(item.row),
+      text: `${formatSigned(item.delta)} s behind`,
+    })),
+    emptyLosses: compare ? `${lapName(compare)} is ahead in every sector versus ${lapName(ref)}.` : "Select a second lap to list sector losses.",
+    convention: `Positive time is behind the reference (lost time). Negative time is ahead of the reference (gained time). Corner bands sit on the delta chart.${missing.length ? ` This session has no ${listWords(missing)} channel.` : ""}`,
+    charts,
+  };
+  try {
+    await downloadCoachingNote(note, kind, safeStem(`${log.track}-${log.fileName}-coaching-note`));
+  } catch (err) {
+    alert(err instanceof Error ? err.message : "Could not export the coaching note.");
+  }
 }
 
 const BCOLORS = ["#7dd3fc", "#c4b5fd", "#fb7185", "#fde68a", "#86efac", "#e2e8f0", "#67e8f9", "#f9a8d4"];
@@ -1160,18 +1704,21 @@ picker.onchange = async () => {
     }
     state.log = prepared;
     state.compare = null;
-    const match = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /throttle/i, /tps/i, /gear/i];
-    const defaults = prepared.channels.filter((c) => match.some((r) => r.test(c.label) || r.test(c.key))).slice(0, 5);
-    state.keys = (defaults.length ? defaults : prepared.channels.slice(0, 3)).map((c) => c.key);
+    const coachKeys = coachingChannelKeys(prepared.channels);
+    const defaults = [coachKeys.brake, coachKeys.throttle, coachKeys.lean].filter((key): key is string => !!key);
+    state.keys = defaults.length ? defaults : prepared.channels.slice(0, 3).map((channel) => channel.key);
     state.laps = ids;
     state.anchor = fastest(flying.length ? flying : prepared.laps).id;
-    const saved = localStorage.getItem("lap-splits:" + prepared.track);
-    state.splits = [];
+    const saved = parseSplitDocument(localStorage.getItem("lap-splits:" + prepared.track));
+    state.spans = [];
+    state.templateId = "manual";
+    state.lapLengthM = rulerLength();
     if (saved) {
-      try {
-        const arr = JSON.parse(saved);
-        if (Array.isArray(arr)) state.splits = arr.filter((n) => typeof n === "number" && n > 0.01 && n < 0.99);
-      } catch { /* ignore */ }
+      state.spans = saved.spans;
+      state.templateId = saved.templateId;
+      state.lapLengthM = saved.lapLengthM || state.lapLengthM;
+    } else if (/zhuhai|\bzic\b/i.test(`${prepared.track} ${prepared.fileName}`)) {
+      applyTemplateId("zic");
     }
     render();
   } catch (err) {
