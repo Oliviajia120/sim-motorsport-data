@@ -20,7 +20,10 @@ h2{font-size:0.72rem;letter-spacing:.06em;text-transform:uppercase;color:#8e98a3
 aside{width:280px;background:#181b1f;border-right:1px solid #323840;padding:.8rem;overflow:auto}
 aside input{width:100%;margin:0 0 .45rem;background:#101214;color:#e7ebef;border:1px solid #323840;border-radius:4px;padding:.35rem .45rem}
 main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
-.list label,.laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
+.list label{display:grid;grid-template-columns:1rem minmax(0,1fr);align-items:center;column-gap:.5rem;min-height:1.6rem;font-size:.84rem;padding:0}
+.list label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.list input{margin:0;width:1rem;height:1rem;justify-self:center}
+.laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
 .laprow{display:flex;align-items:center;justify-content:space-between;gap:.4rem}
 .laprow i{width:.65rem;height:.65rem;border-radius:99px;display:inline-block}
 .row{display:flex;justify-content:space-between;align-items:center}
@@ -38,7 +41,11 @@ main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
 .mark b{width:2px;height:1.2rem;background:#e85d04;display:block}
 .mark span{color:#e85d04;font-size:.75rem;font-family:ui-monospace,monospace}
 .chips{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.4rem}
-.readout{position:fixed;left:12px;right:12px;bottom:10px;z-index:30;background:#181b1f;color:#e7ebef;border:1px solid #e85d04;border-radius:4px;padding:.55rem .7rem;font-family:ui-monospace,monospace;font-size:.85rem;max-height:5.5rem;overflow:auto}
+.readout{position:fixed;left:12px;right:12px;bottom:10px;z-index:30;display:flex;align-items:stretch;gap:.15rem;background:#181b1f;color:#e7ebef;border:1px solid #e85d04;border-radius:4px;padding:.4rem .5rem;font-family:ui-monospace,monospace;font-size:.85rem;overflow-x:auto}
+.readout-time{display:flex;align-items:flex-end;min-width:4.6rem;padding:0 .45rem .05rem 0;color:#f0c14d;font-weight:650}
+.readout-item{display:flex;flex-direction:column;justify-content:center;min-width:7.5rem;max-width:11rem;padding:0 .55rem;border-left:1px solid #323840}
+.readout-item span{color:#8e98a3;font-size:.68rem;letter-spacing:.02em;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.readout-item b{font-weight:650;font-size:.95rem}
 .plot{border:1px solid #323840;border-radius:4px;margin-bottom:.45rem;overflow:hidden;background:#181b1f;cursor:crosshair;touch-action:none}
 .plot canvas{display:block;width:100%}
 table{width:100%;border-collapse:collapse;font-size:.85rem;background:#181b1f}
@@ -2349,7 +2356,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
           <p class="hint">Click the bar to add a split. Drag a marker to move it. The theoretical best uses every full lap in this session, not only the laps drawn on the graph.</p>
           <div id="table"></div>
         </section>
-        <p id="readout" class="readout">Move the mouse across a graph. A white line tracks every graph, and this bar shows the reference-lap value.</p>
+        <p id="readout" class="readout"><span class="hint">Move across a graph. Channel values line up here.</span></p>
         <div id="plots"></div>
       </main>
     </div>
@@ -2391,7 +2398,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       const hay = `${ch.label} ${ch.key}`.toLowerCase();
       if (query && !hay.includes(query)) continue;
       const label = document.createElement("label");
-      label.innerHTML = `<input type="checkbox" ${state.keys.includes(ch.key) ? "checked" : ""}> ${ch.label}`;
+      label.innerHTML = `<input type="checkbox" ${state.keys.includes(ch.key) ? "checked" : ""}><span title="${esc(ch.label)}">${esc(ch.label)}</span>`;
       label.querySelector("input").onchange = () => {
         state.keys = state.keys.includes(ch.key) ? state.keys.filter((k) => k !== ch.key) : [...state.keys, ch.key];
         render();
@@ -2490,12 +2497,25 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     const moveCursor = (t) => {
       state.cursor = t;
       const readout = document.getElementById("readout");
-      const bits = drawn.map((p) => {
-        const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
-        const v = raw * p.scale;
-        return `${p.title} ${Number.isFinite(v) ? v.toFixed(1) : "\u2014"}`;
-      });
-      if (readout) readout.textContent = `Cursor ${t.toFixed(2)} s` + (bits.length ? "    " + bits.join("    ") : "");
+      if (readout) {
+        readout.replaceChildren();
+        const time = document.createElement("div");
+        time.className = "readout-time";
+        time.textContent = `${t.toFixed(2)} s`;
+        readout.appendChild(time);
+        for (const p of drawn) {
+          const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
+          const v = raw * p.scale;
+          const item = document.createElement("div");
+          item.className = "readout-item";
+          const name = document.createElement("span");
+          name.textContent = p.title;
+          const val = document.createElement("b");
+          val.textContent = Number.isFinite(v) ? v.toFixed(1) : "\u2014";
+          item.append(name, val);
+          readout.appendChild(item);
+        }
+      }
       for (const p of drawn) {
         const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
         const v = raw * p.scale;

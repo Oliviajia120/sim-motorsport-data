@@ -535,7 +535,7 @@ function render() {
           <p class="hint">Click the bar to add a split. Drag a marker to move it. The theoretical best uses every full lap in this session, not only the laps drawn on the graph.</p>
           <div id="table"></div>
         </section>
-        <p id="readout" class="readout">Move the mouse across a graph. A white line tracks every graph, and this bar shows the reference-lap value.</p>
+        <p id="readout" class="readout"><span class="hint">Move across a graph. Channel values line up here.</span></p>
         <div id="plots"></div>
       </main>
     </div>
@@ -579,7 +579,7 @@ function render() {
     const hay = `${ch.label} ${ch.key}`.toLowerCase();
     if (query && !hay.includes(query)) continue;
     const label = document.createElement("label");
-    label.innerHTML = `<input type="checkbox" ${state.keys.includes(ch.key) ? "checked" : ""}> ${ch.label}`;
+    label.innerHTML = `<input type="checkbox" ${state.keys.includes(ch.key) ? "checked" : ""}><span title="${esc(ch.label)}">${esc(ch.label)}</span>`;
     label.querySelector("input")!.onchange = () => {
       state.keys = state.keys.includes(ch.key) ? state.keys.filter((k) => k !== ch.key) : [...state.keys, ch.key];
       render();
@@ -690,12 +690,25 @@ function render() {
   const moveCursor = (t: number) => {
     state.cursor = t;
     const readout = document.getElementById("readout");
-    const bits = drawn.map((p) => {
-      const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
-      const v = raw * p.scale;
-      return `${p.title} ${Number.isFinite(v) ? v.toFixed(1) : "—"}`;
-    });
-    if (readout) readout.textContent = `Cursor ${t.toFixed(2)} s` + (bits.length ? "    " + bits.join("    ") : "");
+    if (readout) {
+      readout.replaceChildren();
+      const time = document.createElement("div");
+      time.className = "readout-time";
+      time.textContent = `${t.toFixed(2)} s`;
+      readout.appendChild(time);
+      for (const p of drawn) {
+        const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
+        const v = raw * p.scale;
+        const item = document.createElement("div");
+        item.className = "readout-item";
+        const name = document.createElement("span");
+        name.textContent = p.title;
+        const val = document.createElement("b");
+        val.textContent = Number.isFinite(v) ? v.toFixed(1) : "—";
+        item.append(name, val);
+        readout.appendChild(item);
+      }
+    }
     for (const p of drawn) {
       const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
       const v = raw * p.scale;
