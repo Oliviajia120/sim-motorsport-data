@@ -49,6 +49,7 @@ function channelMax(ch: XrkChannel) {
 
 function displayScale(ch: XrkChannel) {
   if (!isSpeedName(ch.name)) return { unit: ch.units || "", scale: 1 };
+  if (/km\/h|kmh/i.test(ch.units || "")) return { unit: "km/h", scale: 1 };
   const max = channelMax(ch);
   if (max > 0 && max < 130) return { unit: "km/h", scale: 3.6 };
   return { unit: ch.units || "km/h", scale: 1 };
@@ -186,6 +187,121 @@ function channelLabel(ch: XrkChannel) {
   if (name && !isLoggerCode(name)) return name;
   if (func && !generic.test(func)) return func;
   return name || func || "Channel";
+}
+
+function makeChannel(name: string, units: string, func: string, timecodes: Float64Array, values: Float64Array): XrkChannel {
+  return {
+    name,
+    shortName: name,
+    units,
+    decPts: 3,
+    interpolate: true,
+    func,
+    sourceType: 0,
+    sourceChannelId: 0,
+    deviceTag: "dragy",
+    calValue1: 0,
+    calValue2: 0,
+    displayRangeMin: 0,
+    displayRangeMax: 0,
+    timecodes,
+    values,
+  };
+}
+
+function clockSeconds(stamp: number) {
+  const h = Math.floor(stamp / 10000);
+  const m = Math.floor((stamp % 10000) / 100);
+  return h * 3600 + m * 60 + (stamp % 100);
+}
+
+function parseVbo(text: string, fileName: string): XrkLog {
+  const lines = text.split(/\r?\n/);
+  let section = "";
+  const stamps: number[] = [];
+  const latMin: number[] = [];
+  const lonMin: number[] = [];
+  const speed: number[] = [];
+  const heading: number[] = [];
+  const height: number[] = [];
+  const sats: number[] = [];
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    if (trimmed.startsWith("[")) {
+      section = trimmed.toLowerCase();
+      continue;
+    }
+    if (section !== "[data]") continue;
+    const parts = trimmed.split(/\s+/);
+    if (parts.length < 6) continue;
+    const lat = Number(parts[2]);
+    const lon = Number(parts[3]);
+    const vel = Number(parts[4]);
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Number.isFinite(vel)) continue;
+    stamps.push(Number(parts[1]));
+    sats.push(Number(parts[0]));
+    latMin.push(lat);
+    lonMin.push(lon);
+    speed.push(vel);
+    heading.push(Number(parts[5]));
+    height.push(parts.length > 6 ? Number(parts[6]) : 0);
+  }
+  if (stamps.length < 10) throw new Error("This VBO file has no usable data.");
+  const n = stamps.length;
+  let prev = clockSeconds(stamps[0]!);
+  const origin = prev;
+  const times = new Float64Array(n);
+  const lat = new Float64Array(n);
+  const lon = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    let sec = clockSeconds(stamps[i]!);
+    if (sec < prev - 1000) sec += 86400;
+    prev = sec;
+    times[i] = (sec - origin) * 1000;
+    lat[i] = latMin[i]! / 60;
+    lon[i] = -lonMin[i]! / 60;
+  }
+  let gate = -1;
+  for (let i = 0; i < n; i++) {
+    if (speed[i]! > 80) {
+      gate = i;
+      break;
+    }
+  }
+  const laps: XrkLog["laps"] = [];
+  if (gate >= 0) {
+    let travel = 0;
+    let start = gate;
+    let outside = false;
+    for (let i = gate + 1; i < n; i++) {
+      const step = haversine(lat[i - 1]!, lon[i - 1]!, lat[i]!, lon[i]!);
+      if (step < 80) travel += step;
+      const fromGate = haversine(lat[i]!, lon[i]!, lat[gate]!, lon[gate]!);
+      if (travel > 2000 && fromGate > 25) outside = true;
+      if (outside && travel > 2000 && fromGate < 25 && speed[i]! > 40) {
+        laps.push({ num: laps.length + 1, startTime: times[start]!, endTime: times[i]! });
+        start = i;
+        travel = 0;
+        outside = false;
+      }
+    }
+  }
+  if (!laps.length) laps.push({ num: 1, startTime: times[0]!, endTime: times[n - 1]! });
+  const track = fileName.replace(/\.[^.]+$/, "").split("_").slice(3).join(" ").trim();
+  const channels: Record<string, XrkChannel> = {
+    "GPS Speed": makeChannel("GPS Speed", "km/h", "GPS Speed", times, Float64Array.from(speed)),
+    "GPS Latitude": makeChannel("GPS Latitude", "deg", "GPS Latitude", times, lat),
+    "GPS Longitude": makeChannel("GPS Longitude", "deg", "GPS Longitude", times, lon),
+    Heading: makeChannel("Heading", "deg", "Heading", times, Float64Array.from(heading)),
+    Height: makeChannel("Height", "m", "Height", times, Float64Array.from(height)),
+    Satellites: makeChannel("Satellites", "", "Satellites", times, Float64Array.from(sats)),
+  };
+  return {
+    channels,
+    laps,
+    metadata: { Vehicle: "Dragy", Venue: track || "Session", Source: "Dragy VBO" },
+  };
 }
 
 function prepare(log: XrkLog, fileName: string): Prepared {
@@ -511,9 +627,9 @@ async function askGrok(question: string) {
 function render() {
   const log = state.log;
   if (!log) {
-    app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open .xrk</button></header>
+    app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open file</button></header>
       <main class="empty"><h2>Sectors, then the ideal lap</h2>
-      <p>Open a session, drop splits along the lap, and the ideal time is the sum of the fastest pass through each sector.</p>
+      <p>Open an AIM .xrk or a Dragy .vbo. Drop splits along the lap, and the ideal time is the sum of the fastest pass through each sector.</p>
       <button id="open2">Choose a file</button></main>`;
     document.getElementById("open")!.onclick = pick;
     document.getElementById("open2")!.onclick = pick;
@@ -533,7 +649,7 @@ function render() {
   app.innerHTML = `
     <header class="bar">
       <h1>Sim Motorsport Data</h1>
-      <button id="open">Open .xrk</button>
+      <button id="open">Open file</button>
       <button id="grok">Grok</button>
       <span class="meta">${log.fileName} · ${log.vehicle} · ${log.track}</span>
     </header>
@@ -955,7 +1071,7 @@ function draw(
 
 const picker = document.createElement("input");
 picker.type = "file";
-picker.accept = ".xrk,.xrz";
+picker.accept = ".xrk,.xrz,.vbo";
 picker.style.display = "none";
 document.body.appendChild(picker);
 picker.onchange = async () => {
@@ -964,7 +1080,9 @@ picker.onchange = async () => {
   if (!file) return;
   try {
     const buf = await file.arrayBuffer();
-    const parsed = parseXrk(new Uint8Array(buf));
+    const parsed = file.name.toLowerCase().endsWith(".vbo")
+      ? parseVbo(new TextDecoder().decode(buf), file.name)
+      : parseXrk(new Uint8Array(buf));
     const prepared = prepare(parsed, file.name);
     if (!prepared.laps.length) {
       alert("No laps with a usable distance trace were found.");
