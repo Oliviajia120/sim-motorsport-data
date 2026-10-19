@@ -157,11 +157,35 @@ function profileFromSpeed(
   return profileFromPoints(num, startMs, endMs, duration, times, dist, "speed");
 }
 
+const NAMED: [RegExp, string][] = [
+  [/twist[\s_-]*grip/i, "Throttle Twist Grip"],
+  [/tps[\s_-]*vert/i, "Throttle Position Vertical"],
+  [/tps[\s_-]*hor/i, "Throttle Position Horizontal"],
+  [/rear[\s_-]*shock/i, "Rear Shock Position"],
+  [/front[\s_-]*fork/i, "Front Fork Position"],
+  [/front[\s_-]*brake|brake[\s_-]*front/i, "Front Brake"],
+  [/speed[\s_-]*rear|rear[\s_-]*wheel[\s_-]*speed/i, "Rear Wheel Speed"],
+  [/speed[\s_-]*front|front[\s_-]*wheel[\s_-]*speed/i, "Front Wheel Speed"],
+  [/^rpm$/i, "Engine RPM"],
+  [/bike[\s_-]*angle|lean[\s_-]*angle/i, "Lean Angle"],
+  [/^gear$/i, "Gear"],
+];
+
+function isLoggerCode(name: string) {
+  return /^[0-9]/.test(name) || /^[A-Za-z]{1,4}\d/.test(name);
+}
+
 function channelLabel(ch: XrkChannel) {
+  const raw = ch.name.trim();
+  const name = raw.replaceAll("_", " ");
+  for (const [re, label] of NAMED) {
+    if (re.test(raw) || re.test(name)) return label;
+  }
   const func = ch.func?.trim() || "";
-  const name = ch.name.replaceAll("_", " ").trim();
-  if (!func || /^number$/i.test(func)) return name || "Channel";
-  return func;
+  const generic = /^(number|percent|percentage|distance|time|angle|pressure|temperature|voltage|acceleration|angular rate)$/i;
+  if (name && !isLoggerCode(name)) return name;
+  if (func && !generic.test(func)) return func;
+  return name || func || "Channel";
 }
 
 function prepare(log: XrkLog, fileName: string): Prepared {
@@ -171,7 +195,11 @@ function prepare(log: XrkLog, fileName: string): Prepared {
       const d = displayScale(ch);
       return { key: ch.name, label: channelLabel(ch), unit: d.unit, scale: d.scale, channel: ch };
     })
-    .sort((a, b) => a.label.localeCompare(b.label));
+    .sort((a, b) => {
+      const rank = (s: string) => (/twist|throttle|tps/i.test(s) ? 0 : /shock/i.test(s) ? 1 : /fork/i.test(s) ? 2 : /rpm/i.test(s) ? 3 : /speed/i.test(s) ? 4 : 9);
+      const d = rank(a.label + a.key) - rank(b.label + b.key);
+      return d || a.label.localeCompare(b.label);
+    });
   const lat = Object.values(log.channels).find(
     (ch) => ch.name === "GPS Latitude" || (/lat/i.test(ch.name) && !/acc|lateral/i.test(ch.name)),
   );
@@ -290,6 +318,7 @@ const state: State = { log: null, keys: [], laps: [], anchor: null, splits: [], 
 type GrokMsg = { role: "user" | "assistant"; content: string };
 const grokChat: GrokMsg[] = [];
 let grokBusy = false;
+let channelQuery = "";
 
 const app = document.getElementById("app")!;
 
@@ -479,6 +508,7 @@ function render() {
     <div class="layout">
       <aside>
         <h2>Channels</h2>
+        <input id="ch-filter" placeholder="Search shock, throttle, fork" value="${esc(channelQuery)}">
         <div class="list" id="channels"></div>
         <div class="row"><h2>Laps</h2><button id="flying" class="link">Flying only</button></div>
         <div id="laps"></div>
@@ -544,7 +574,10 @@ function render() {
   };
 
   const chBox = document.getElementById("channels")!;
+  const query = channelQuery.trim().toLowerCase();
   for (const ch of log.channels) {
+    const hay = `${ch.label} ${ch.key}`.toLowerCase();
+    if (query && !hay.includes(query)) continue;
     const label = document.createElement("label");
     label.innerHTML = `<input type="checkbox" ${state.keys.includes(ch.key) ? "checked" : ""}> ${ch.label}`;
     label.querySelector("input")!.onchange = () => {
@@ -552,6 +585,19 @@ function render() {
       render();
     };
     chBox.appendChild(label);
+  }
+  const filter = document.getElementById("ch-filter") as HTMLInputElement;
+  filter.oninput = () => {
+    channelQuery = filter.value;
+    const caret = filter.selectionStart ?? filter.value.length;
+    render();
+    const again = document.getElementById("ch-filter") as HTMLInputElement | null;
+    if (!again) return;
+    again.focus();
+    again.setSelectionRange(caret, caret);
+  };
+  if (!chBox.childElementCount) {
+    chBox.textContent = "No channel matches that search.";
   }
   const lapBox = document.getElementById("laps")!;
   log.laps.forEach((lap, index) => {
@@ -879,7 +925,7 @@ picker.onchange = async () => {
       return;
     }
     state.log = prepared;
-    const match = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /gear/i];
+    const match = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /throttle/i, /tps/i, /gear/i];
     const defaults = prepared.channels.filter((c) => match.some((r) => r.test(c.label) || r.test(c.key))).slice(0, 5);
     state.keys = (defaults.length ? defaults : prepared.channels.slice(0, 3)).map((c) => c.key);
     const quick = fastest(prepared.laps).duration;

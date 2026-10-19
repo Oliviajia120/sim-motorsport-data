@@ -18,6 +18,7 @@ h2{font-size:0.72rem;letter-spacing:.06em;text-transform:uppercase;color:#8e98a3
 .empty h2{font-size:1.7rem;color:#e7ebef;letter-spacing:0;text-transform:none}
 .layout{display:flex;min-height:calc(100vh - 58px)}
 aside{width:280px;background:#181b1f;border-right:1px solid #323840;padding:.8rem;overflow:auto}
+aside input{width:100%;margin:0 0 .45rem;background:#101214;color:#e7ebef;border:1px solid #323840;border-radius:4px;padding:.35rem .45rem}
 main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
 .list label,.laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
 .laprow{display:flex;align-items:center;justify-content:space-between;gap:.4rem}
@@ -2013,17 +2014,43 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     }
     return profileFromPoints(num, startMs, endMs, duration, times, dist, "speed");
   }
+  var NAMED = [
+    [/twist[\s_-]*grip/i, "Throttle Twist Grip"],
+    [/tps[\s_-]*vert/i, "Throttle Position Vertical"],
+    [/tps[\s_-]*hor/i, "Throttle Position Horizontal"],
+    [/rear[\s_-]*shock/i, "Rear Shock Position"],
+    [/front[\s_-]*fork/i, "Front Fork Position"],
+    [/front[\s_-]*brake|brake[\s_-]*front/i, "Front Brake"],
+    [/speed[\s_-]*rear|rear[\s_-]*wheel[\s_-]*speed/i, "Rear Wheel Speed"],
+    [/speed[\s_-]*front|front[\s_-]*wheel[\s_-]*speed/i, "Front Wheel Speed"],
+    [/^rpm$/i, "Engine RPM"],
+    [/bike[\s_-]*angle|lean[\s_-]*angle/i, "Lean Angle"],
+    [/^gear$/i, "Gear"]
+  ];
+  function isLoggerCode(name) {
+    return /^[0-9]/.test(name) || /^[A-Za-z]{1,4}\d/.test(name);
+  }
   function channelLabel(ch) {
+    const raw = ch.name.trim();
+    const name = raw.replaceAll("_", " ");
+    for (const [re, label] of NAMED) {
+      if (re.test(raw) || re.test(name)) return label;
+    }
     const func = ch.func?.trim() || "";
-    const name = ch.name.replaceAll("_", " ").trim();
-    if (!func || /^number$/i.test(func)) return name || "Channel";
-    return func;
+    const generic = /^(number|percent|percentage|distance|time|angle|pressure|temperature|voltage|acceleration|angular rate)$/i;
+    if (name && !isLoggerCode(name)) return name;
+    if (func && !generic.test(func)) return func;
+    return name || func || "Channel";
   }
   function prepare(log, fileName) {
     const channels = Object.values(log.channels).filter((ch) => ch.timecodes.length > 1).map((ch) => {
       const d = displayScale(ch);
       return { key: ch.name, label: channelLabel(ch), unit: d.unit, scale: d.scale, channel: ch };
-    }).sort((a, b) => a.label.localeCompare(b.label));
+    }).sort((a, b) => {
+      const rank = (s) => /twist|throttle|tps/i.test(s) ? 0 : /shock/i.test(s) ? 1 : /fork/i.test(s) ? 2 : /rpm/i.test(s) ? 3 : /speed/i.test(s) ? 4 : 9;
+      const d = rank(a.label + a.key) - rank(b.label + b.key);
+      return d || a.label.localeCompare(b.label);
+    });
     const lat = Object.values(log.channels).find(
       (ch) => ch.name === "GPS Latitude" || /lat/i.test(ch.name) && !/acc|lateral/i.test(ch.name)
     );
@@ -2117,6 +2144,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
   var state = { log: null, keys: [], laps: [], anchor: null, splits: [], place: false, cursor: null, equal: 4, drag: null, grok: false };
   var grokChat = [];
   var grokBusy = false;
+  var channelQuery = "";
   var app = document.getElementById("app");
   function fastest(laps) {
     return laps.reduce((b, l) => l.duration < b.duration ? l : b);
@@ -2294,6 +2322,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     <div class="layout">
       <aside>
         <h2>Channels</h2>
+        <input id="ch-filter" placeholder="Search shock, throttle, fork" value="${esc(channelQuery)}">
         <div class="list" id="channels"></div>
         <div class="row"><h2>Laps</h2><button id="flying" class="link">Flying only</button></div>
         <div id="laps"></div>
@@ -2357,7 +2386,10 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       render();
     };
     const chBox = document.getElementById("channels");
+    const query = channelQuery.trim().toLowerCase();
     for (const ch of log.channels) {
+      const hay = `${ch.label} ${ch.key}`.toLowerCase();
+      if (query && !hay.includes(query)) continue;
       const label = document.createElement("label");
       label.innerHTML = `<input type="checkbox" ${state.keys.includes(ch.key) ? "checked" : ""}> ${ch.label}`;
       label.querySelector("input").onchange = () => {
@@ -2365,6 +2397,19 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         render();
       };
       chBox.appendChild(label);
+    }
+    const filter = document.getElementById("ch-filter");
+    filter.oninput = () => {
+      channelQuery = filter.value;
+      const caret = filter.selectionStart ?? filter.value.length;
+      render();
+      const again = document.getElementById("ch-filter");
+      if (!again) return;
+      again.focus();
+      again.setSelectionRange(caret, caret);
+    };
+    if (!chBox.childElementCount) {
+      chBox.textContent = "No channel matches that search.";
     }
     const lapBox = document.getElementById("laps");
     log.laps.forEach((lap, index) => {
@@ -2662,7 +2707,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         return;
       }
       state.log = prepared;
-      const match = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /gear/i];
+      const match = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /throttle/i, /tps/i, /gear/i];
       const defaults = prepared.channels.filter((c) => match.some((r) => r.test(c.label) || r.test(c.key))).slice(0, 5);
       state.keys = (defaults.length ? defaults : prepared.channels.slice(0, 3)).map((c) => c.key);
       const quick = fastest(prepared.laps).duration;
