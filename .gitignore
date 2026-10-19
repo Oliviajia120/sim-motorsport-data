@@ -1,0 +1,4 @@
+node_modules/
+*.xrk
+*.xrz
+.DS_Store
