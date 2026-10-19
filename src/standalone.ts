@@ -157,12 +157,19 @@ function profileFromSpeed(
   return profileFromPoints(num, startMs, endMs, duration, times, dist, "speed");
 }
 
+function channelLabel(ch: XrkChannel) {
+  const func = ch.func?.trim() || "";
+  const name = ch.name.replaceAll("_", " ").trim();
+  if (!func || /^number$/i.test(func)) return name || "Channel";
+  return func;
+}
+
 function prepare(log: XrkLog, fileName: string): Prepared {
   const channels = Object.values(log.channels)
     .filter((ch) => ch.timecodes.length > 1)
     .map((ch) => {
       const d = displayScale(ch);
-      return { key: ch.name, label: ch.func?.trim() || ch.name.replaceAll("_", " "), unit: d.unit, scale: d.scale, channel: ch };
+      return { key: ch.name, label: channelLabel(ch), unit: d.unit, scale: d.scale, channel: ch };
     })
     .sort((a, b) => a.label.localeCompare(b.label));
   const lat = Object.values(log.channels).find(
@@ -239,6 +246,20 @@ function fractionAtTime(p: LapProfile, timeSec: number) {
   const u = span > 1e-6 ? (timeSec - p.times[lo - 1]!) / span : 0;
   const d = p.dist[lo - 1]! + u * (p.dist[lo]! - p.dist[lo - 1]!);
   return Math.min(1, Math.max(0, d / p.total));
+}
+
+function nearest(samples: Sample[], t: number) {
+  if (!samples.length) return NaN;
+  let lo = 0;
+  let hi = samples.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (samples[mid]!.t < t) lo = mid + 1;
+    else hi = mid;
+  }
+  const a = samples[Math.max(0, lo - 1)]!;
+  const b = samples[lo]!;
+  return Math.abs(a.t - t) <= Math.abs(b.t - t) ? a.v : b.v;
 }
 
 function downsample(samples: Sample[], maxPoints: number) {
@@ -367,7 +388,7 @@ function render() {
           <div id="chips" class="chips"></div>
           <p class="hint">Click the bar to add a split. Drag a marker to move it. Lines follow reference lap ${anchor ? "L" + anchor.num : ""}.</p>
         </section>
-        <p id="readout" class="hint"></p>
+        <p id="readout" class="readout">Move the mouse across a graph. A white line tracks every graph, and this bar shows the reference-lap value.</p>
         <div id="plots"></div>
         <div id="table"></div>
       </main>
@@ -480,7 +501,36 @@ function render() {
   const xMax = laps.length ? Math.max(...laps.map((l) => l.duration)) : 60;
   const splitTimes = anchor ? [...state.splits].sort((a, b) => a - b).map((f) => timeAtFraction(anchor, f)) : [];
   const plots = document.getElementById("plots")!;
-  const shown = state.keys.map((k) => log.channels.find((c) => c.key === k)).filter((c): c is PrepChannel => !!c).slice(0, 6);
+  const shown = state.keys.map((k) => log.channels.find((c) => c.key === k)).filter((c): c is PrepChannel => !!c).slice(0, 8);
+  const anchorIndex = anchor ? laps.findIndex((l) => l.num === anchor.num) : -1;
+  type Drawn = {
+    canvas: HTMLCanvasElement;
+    wrap: HTMLElement;
+    title: string;
+    unit: string;
+    series: { color: string; samples: Sample[]; scale: number }[];
+    anchorSamples: Sample[] | null;
+    scale: number;
+  };
+  const drawn: Drawn[] = [];
+  const timeOf = (e: PointerEvent, canvas: HTMLCanvasElement) => {
+    const r = canvas.getBoundingClientRect();
+    const plotW = r.width - 64;
+    if (plotW <= 0) return null;
+    const x = Math.min(plotW, Math.max(0, e.clientX - r.left - 52));
+    return (x / plotW) * xMax;
+  };
+  const moveCursor = (t: number) => {
+    state.cursor = t;
+    const readout = document.getElementById("readout");
+    const bits = drawn.map((p) => {
+      const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
+      const v = raw * p.scale;
+      return `${p.title} ${Number.isFinite(v) ? v.toFixed(1) : "—"}`;
+    });
+    if (readout) readout.textContent = `Cursor ${t.toFixed(2)} s` + (bits.length ? "    " + bits.join("    ") : "");
+    for (const p of drawn) draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t);
+  };
   for (const ch of shown) {
     const wrap = document.createElement("div");
     wrap.className = "plot";
@@ -492,40 +542,27 @@ function render() {
       samples: downsample(sliceChannel(ch.channel, lap.startMs, lap.endMs), 700),
       scale: ch.scale,
     }));
+    const item: Drawn = {
+      canvas,
+      wrap,
+      title: ch.label,
+      unit: ch.unit,
+      series,
+      anchorSamples: anchorIndex >= 0 ? series[anchorIndex]!.samples : null,
+      scale: ch.scale,
+    };
+    drawn.push(item);
     draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor);
-    const timeOf = (e: PointerEvent) => {
-      const r = canvas.getBoundingClientRect();
-      const x = e.clientX - r.left - 52;
-      const w = r.width - 64;
-      if (w <= 0) return null;
-      const t = (x / w) * xMax;
-      return t < 0 || t > xMax ? null : t;
-    };
-    canvas.onpointermove = (e) => {
-      const t = timeOf(e);
-      state.cursor = t;
-      const readout = document.getElementById("readout");
-      if (!readout || t == null || !anchor) return;
-      const bits = shown.map((c) => {
-        const samples = sliceChannel(c.channel, anchor.startMs, anchor.endMs);
-        let best = Infinity;
-        let v = NaN;
-        for (const s of samples) {
-          const d = Math.abs(s.t - t);
-          if (d < best) {
-            best = d;
-            v = s.v * c.scale;
-          }
-        }
-        return `${c.label} ${Number.isFinite(v) ? v.toFixed(1) : "—"}`;
-      });
-      readout.textContent = `t ${t.toFixed(2)}s   ` + bits.join("   ");
-      draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, t);
-    };
-    canvas.onpointerdown = (e) => {
-      if (!state.place || !anchor) return;
-      const t = timeOf(e);
+    wrap.onpointermove = (e) => {
+      const t = timeOf(e, canvas);
       if (t == null) return;
+      moveCursor(t);
+    };
+    wrap.onpointerdown = (e) => {
+      const t = timeOf(e, canvas);
+      if (t == null) return;
+      moveCursor(t);
+      if (!state.place || !anchor) return;
       addSplit(fractionAtTime(anchor, t));
       render();
     };
@@ -561,8 +598,12 @@ function draw(
   const width = wrap.clientWidth || 800;
   const height = 160;
   const dpr = Math.min(devicePixelRatio || 1, 2);
-  canvas.width = Math.floor(width * dpr);
-  canvas.height = Math.floor(height * dpr);
+  const bw = Math.floor(width * dpr);
+  const bh = Math.floor(height * dpr);
+  if (canvas.width !== bw || canvas.height !== bh) {
+    canvas.width = bw;
+    canvas.height = bh;
+  }
   canvas.style.width = "100%";
   canvas.style.height = height + "px";
   ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
@@ -639,7 +680,8 @@ function draw(
   ctx.setLineDash([]);
   if (cursor != null) {
     const x = xOf(cursor);
-    ctx.strokeStyle = "#e7ebef";
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(x, pad.t);
     ctx.lineTo(x, pad.t + plotH);
