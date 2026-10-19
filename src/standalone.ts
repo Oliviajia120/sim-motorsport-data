@@ -529,7 +529,12 @@ function render() {
       return `${p.title} ${Number.isFinite(v) ? v.toFixed(1) : "—"}`;
     });
     if (readout) readout.textContent = `Cursor ${t.toFixed(2)} s` + (bits.length ? "    " + bits.join("    ") : "");
-    for (const p of drawn) draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t);
+    for (const p of drawn) {
+      const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
+      const v = raw * p.scale;
+      const text = Number.isFinite(v) ? v.toFixed(1) : "—";
+      draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t, text);
+    }
   };
   for (const ch of shown) {
     const wrap = document.createElement("div");
@@ -552,7 +557,11 @@ function render() {
       scale: ch.scale,
     };
     drawn.push(item);
-    draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor);
+    const startValue = state.cursor == null || !item.anchorSamples ? "" : (() => {
+      const raw = nearest(item.anchorSamples, state.cursor) * item.scale;
+      return Number.isFinite(raw) ? raw.toFixed(1) : "";
+    })();
+    draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor, startValue);
     wrap.onpointermove = (e) => {
       const t = timeOf(e, canvas);
       if (t == null) return;
@@ -592,6 +601,7 @@ function draw(
   xMax: number,
   splitTimes: number[],
   cursor: number | null,
+  cursorText: string,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -686,6 +696,19 @@ function draw(
     ctx.moveTo(x, pad.t);
     ctx.lineTo(x, pad.t + plotH);
     ctx.stroke();
+    if (cursorText) {
+      const label = unit ? `${cursorText} ${unit}` : cursorText;
+      ctx.font = "600 12px ui-monospace, monospace";
+      const tw = ctx.measureText(label).width + 10;
+      const lx = x + tw + 8 > width - pad.r ? x - tw - 4 : x + 4;
+      const ly = pad.t + 4;
+      ctx.fillStyle = "#101214";
+      ctx.fillRect(lx, ly, tw, 16);
+      ctx.strokeStyle = "#ffffff";
+      ctx.strokeRect(lx, ly, tw, 16);
+      ctx.fillStyle = "#ffffff";
+      ctx.fillText(label, lx + 5, ly + 12);
+    }
   }
   ctx.fillStyle = "#e7ebef";
   ctx.font = "600 12px sans-serif";

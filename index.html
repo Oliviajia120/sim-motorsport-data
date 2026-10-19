@@ -18,7 +18,7 @@ h2{font-size:0.72rem;letter-spacing:.06em;text-transform:uppercase;color:#8e98a3
 .empty h2{font-size:1.7rem;color:#e7ebef;letter-spacing:0;text-transform:none}
 .layout{display:flex;min-height:calc(100vh - 58px)}
 aside{width:280px;background:#181b1f;border-right:1px solid #323840;padding:.8rem;overflow:auto}
-main{flex:1;padding:.8rem;overflow:auto;min-width:0}
+main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
 .list label,.laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
 .laprow{display:flex;align-items:center;justify-content:space-between;gap:.4rem}
 .laprow i{width:.65rem;height:.65rem;border-radius:99px;display:inline-block}
@@ -37,7 +37,7 @@ main{flex:1;padding:.8rem;overflow:auto;min-width:0}
 .mark b{width:2px;height:1.2rem;background:#e85d04;display:block}
 .mark span{color:#e85d04;font-size:.75rem;font-family:ui-monospace,monospace}
 .chips{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.4rem}
-.readout{position:sticky;top:0;z-index:2;background:#22262c;color:#e7ebef;border:1px solid #e85d04;border-radius:4px;padding:.5rem .7rem;margin:0 0 .45rem;font-family:ui-monospace,monospace;font-size:.85rem}
+.readout{position:fixed;left:12px;right:12px;bottom:10px;z-index:30;background:#181b1f;color:#e7ebef;border:1px solid #e85d04;border-radius:4px;padding:.55rem .7rem;font-family:ui-monospace,monospace;font-size:.85rem;max-height:5.5rem;overflow:auto}
 .plot{border:1px solid #323840;border-radius:4px;margin-bottom:.45rem;overflow:hidden;background:#181b1f;cursor:crosshair;touch-action:none}
 .plot canvas{display:block;width:100%}
 table{width:100%;border-collapse:collapse;font-size:.85rem;background:#181b1f}
@@ -2329,7 +2329,12 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         return `${p.title} ${Number.isFinite(v) ? v.toFixed(1) : "\u2014"}`;
       });
       if (readout) readout.textContent = `Cursor ${t.toFixed(2)} s` + (bits.length ? "    " + bits.join("    ") : "");
-      for (const p of drawn) draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t);
+      for (const p of drawn) {
+        const raw = p.anchorSamples ? nearest(p.anchorSamples, t) : NaN;
+        const v = raw * p.scale;
+        const text = Number.isFinite(v) ? v.toFixed(1) : "\u2014";
+        draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t, text);
+      }
     };
     for (const ch of shown) {
       const wrap = document.createElement("div");
@@ -2352,7 +2357,11 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         scale: ch.scale
       };
       drawn.push(item);
-      draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor);
+      const startValue = state.cursor == null || !item.anchorSamples ? "" : (() => {
+        const raw = nearest(item.anchorSamples, state.cursor) * item.scale;
+        return Number.isFinite(raw) ? raw.toFixed(1) : "";
+      })();
+      draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor, startValue);
       wrap.onpointermove = (e) => {
         const t = timeOf(e, canvas);
         if (t == null) return;
@@ -2377,7 +2386,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       document.getElementById("table").innerHTML = `<table>${head}${body}${foot}</table>`;
     }
   }
-  function draw(canvas, wrap, title, unit, series, xMax, splitTimes, cursor) {
+  function draw(canvas, wrap, title, unit, series, xMax, splitTimes, cursor, cursorText) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const width = wrap.clientWidth || 800;
@@ -2471,6 +2480,19 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       ctx.moveTo(x, pad.t);
       ctx.lineTo(x, pad.t + plotH);
       ctx.stroke();
+      if (cursorText) {
+        const label = unit ? `${cursorText} ${unit}` : cursorText;
+        ctx.font = "600 12px ui-monospace, monospace";
+        const tw = ctx.measureText(label).width + 10;
+        const lx = x + tw + 8 > width - pad.r ? x - tw - 4 : x + 4;
+        const ly = pad.t + 4;
+        ctx.fillStyle = "#101214";
+        ctx.fillRect(lx, ly, tw, 16);
+        ctx.strokeStyle = "#ffffff";
+        ctx.strokeRect(lx, ly, tw, 16);
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(label, lx + 5, ly + 12);
+      }
     }
     ctx.fillStyle = "#e7ebef";
     ctx.font = "600 12px sans-serif";
