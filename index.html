@@ -2223,7 +2223,36 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         lines.push(`S${row.index} ${(row.from * 100).toFixed(0)}-${(row.to * 100).toFixed(0)}% best ${formatLap(row.best)} from L${row.bestLap}. ${each}`);
       }
     }
-    lines.push(`Channels selected: ${state.keys.join(", ") || "none"}`);
+    lines.push("Checked channels. Numbers are min/avg/max in display units. Sector figures are min/avg/max inside that sector.");
+    const selected = state.keys.map((key) => log.channels.find((ch) => ch.key === key)).filter((ch) => !!ch).slice(0, 8);
+    if (!selected.length) lines.push("No channels are checked.");
+    for (const ch of selected) {
+      lines.push(`Channel ${ch.label} [${ch.key}] ${ch.unit || "no unit"}`);
+      for (const lap of laps) {
+        const samples = sliceChannel(ch.channel, lap.startMs, lap.endMs);
+        const summarise = (list) => {
+          let min = Infinity;
+          let max = -Infinity;
+          let sum = 0;
+          let n = 0;
+          for (const sample of list) {
+            const v = sample.v * ch.scale;
+            if (!Number.isFinite(v)) continue;
+            if (v < min) min = v;
+            if (v > max) max = v;
+            sum += v;
+            n++;
+          }
+          return n ? `${min.toFixed(1)}/${(sum / n).toFixed(1)}/${max.toFixed(1)}` : "no samples";
+        };
+        const parts = rows.map((row) => {
+          const from = timeAtFraction(lap, row.from);
+          const to = timeAtFraction(lap, row.to);
+          return `S${row.index} ${summarise(samples.filter((sample) => sample.t >= from && sample.t <= to))}`;
+        });
+        lines.push(`  L${lap.num} ${summarise(samples)}${parts.length ? " | " + parts.join(" ") : ""}`);
+      }
+    }
     return lines.join("\n");
   }
   function esc(s) {
@@ -2283,7 +2312,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         body: JSON.stringify({
           model,
           messages: [
-            { role: "system", content: "You are a motorcycle racing engineer reading AIM telemetry for a coach. Use only the session below. Name the lap and the sector. If a channel is not in the brief, say you cannot see it.\n\n" + sessionBrief() },
+            { role: "system", content: "You are a motorcycle racing engineer reading AIM telemetry for a coach. The session below includes every checked channel, with min/avg/max for each lap and again inside each sector. Use those numbers. Do not say a channel is missing when a line starts with Channel and that name. Name the lap and the sector.\n\n" + sessionBrief() },
             ...grokChat
           ]
         })
@@ -2584,7 +2613,8 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       };
       document.getElementById("grok-brief").onclick = () => {
         if (grokBusy) return;
-        void askGrok("Read this session. Give the theoretical best, which lap owns each sector, and what is worth checking next.");
+        grokChat.length = 0;
+        void askGrok("Read this session. The checked channels include throttle, fork and shock, with min/avg/max per lap and per sector. Give the theoretical best, which lap owns each sector, and what those channel numbers show.");
       };
       document.getElementById("grok-copy").onclick = async () => {
         try {
