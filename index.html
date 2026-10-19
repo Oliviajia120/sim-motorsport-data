@@ -1978,7 +1978,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       times.push(duration);
       dist.push(total);
     }
-    return { num, startMs, endMs, duration, times, dist, total, source };
+    return { num, startMs, endMs, duration, times, dist, total, source, side: "A", id: `A${num}` };
   }
   function profileFromGps(num, startMs, endMs, duration, lat, lon) {
     const n = Math.min(lat.length, lon.length);
@@ -2162,7 +2162,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       metadata: { Vehicle: "Dragy", Venue: track || "Session", Source: "Dragy VBO" }
     };
   }
-  function prepare(log, fileName) {
+  function prepare(log, fileName, side = "A") {
     const channels = Object.values(log.channels).filter((ch) => ch.timecodes.length > 1).map((ch) => {
       const d = displayScale(ch);
       return { key: ch.name, label: channelLabel(ch), unit: d.unit, scale: d.scale, channel: ch };
@@ -2193,6 +2193,8 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         profile = profileFromSpeed(lap.num, lap.startTime, lap.endTime, duration, sliceChannel(speed, lap.startTime, lap.endTime), speedIsMs);
       }
       if (!profile) continue;
+      profile.side = side;
+      profile.id = `${side}${profile.num}`;
       if (profile.source === "gps") gps++;
       else spd++;
       laps.push(profile);
@@ -2261,7 +2263,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     if (out[out.length - 1] !== last2) out.push(last2);
     return out;
   }
-  var state = { log: null, keys: [], laps: [], anchor: null, splits: [], place: false, cursor: null, equal: 4, drag: null, grok: false };
+  var state = { log: null, compare: null, keys: [], laps: [], anchor: null, splits: [], place: false, cursor: null, equal: 4, drag: null, grok: false };
   var grokChat = [];
   var grokBusy = false;
   var channelQuery = "";
@@ -2269,16 +2271,26 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
   function fastest(laps) {
     return laps.reduce((b, l) => l.duration < b.duration ? l : b);
   }
+  function everyLap() {
+    return [...state.log?.laps ?? [], ...state.compare?.laps ?? []];
+  }
+  function lapName(lap) {
+    return state.compare ? `${lap.side}${lap.num}` : `L${lap.num}`;
+  }
+  function nameOfId(id) {
+    const lap = everyLap().find((l) => l.id === id);
+    return lap ? lapName(lap) : id;
+  }
   function chosen() {
-    return state.log ? state.log.laps.filter((l) => state.laps.includes(l.num)) : [];
+    return everyLap().filter((l) => state.laps.includes(l.id));
   }
   function anchorLap() {
     const laps = chosen();
     if (!laps.length) return null;
-    return laps.find((l) => l.num === state.anchor) ?? fastest(laps);
+    return laps.find((l) => l.id === state.anchor) ?? fastest(laps);
   }
   function comparedLaps() {
-    const all = state.log?.laps ?? [];
+    const all = everyLap();
     if (all.length < 2) return all;
     const totals = all.map((l) => l.total).sort((a, b) => a - b);
     const median = totals[Math.floor((totals.length - 1) / 2)] || 1;
@@ -2295,11 +2307,11 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       const to = bounds[s + 1];
       const times = laps.map((lap) => timeAtFraction(lap, to) - timeAtFraction(lap, from));
       let best = Infinity;
-      let bestLap = laps[0].num;
+      let bestLap = laps[0].id;
       times.forEach((t, i) => {
         if (t > 0.05 && t < best) {
           best = t;
-          bestLap = laps[i].num;
+          bestLap = laps[i].id;
         }
       });
       rows.push({ index: s + 1, from, to, times, best, bestLap });
@@ -2322,18 +2334,19 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     const laps = comparedLaps();
     const rows = sectors();
     const lines = [
-      `File: ${log.fileName}`,
-      `Vehicle: ${log.vehicle}`,
+      `File A: ${log.fileName}${state.compare ? `
+File B: ${state.compare.fileName}` : ""}`,
+      `Vehicle: ${log.vehicle}${state.compare ? " vs " + state.compare.vehicle : ""}`,
       `Track: ${log.track}`,
-      `Laps: ${laps.map((l) => `L${l.num} ${formatLap(l.duration)}`).join(", ")}`
+      `Laps: ${laps.map((l) => `${lapName(l)} ${formatLap(l.duration)}`).join(", ")}`
     ];
     if (!rows.length) lines.push("No splits are set, so there is no theoretical best yet.");
     else {
       const ideal = rows.every((r) => Number.isFinite(r.best)) ? rows.reduce((s, r) => s + r.best, 0) : NaN;
       lines.push(`Theoretical best: ${formatLap(ideal)}`);
       for (const row of rows) {
-        const each = laps.map((l, i) => `L${l.num} ${formatLap(row.times[i])}`).join(", ");
-        lines.push(`S${row.index} ${(row.from * 100).toFixed(0)}-${(row.to * 100).toFixed(0)}% best ${formatLap(row.best)} from L${row.bestLap}. ${each}`);
+        const each = laps.map((l, i) => `${lapName(l)} ${formatLap(row.times[i])}`).join(", ");
+        lines.push(`S${row.index} ${(row.from * 100).toFixed(0)}-${(row.to * 100).toFixed(0)}% best ${formatLap(row.best)} from ${nameOfId(row.bestLap)}. ${each}`);
       }
     }
     lines.push("Checked channels. Numbers are min/avg/max in display units. Sector figures are min/avg/max inside that sector.");
@@ -2342,14 +2355,19 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     for (const ch of selected) {
       lines.push(`Channel ${ch.label} [${ch.key}] ${ch.unit || "no unit"}`);
       for (const lap of laps) {
-        const samples = sliceChannel(ch.channel, lap.startMs, lap.endMs);
+        const own = (lap.side === "B" ? state.compare : log)?.channels.find((item) => item.key === ch.key);
+        if (!own) {
+          lines.push(`  ${lapName(lap)} not logged in that file`);
+          continue;
+        }
+        const samples = sliceChannel(own.channel, lap.startMs, lap.endMs);
         const summarise = (list) => {
           let min = Infinity;
           let max = -Infinity;
           let sum = 0;
           let n = 0;
           for (const sample of list) {
-            const v = sample.v * ch.scale;
+            const v = sample.v * own.scale;
             if (!Number.isFinite(v)) continue;
             if (v < min) min = v;
             if (v > max) max = v;
@@ -2363,7 +2381,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
           const to = timeAtFraction(lap, row.to);
           return `S${row.index} ${summarise(samples.filter((sample) => sample.t >= from && sample.t <= to))}`;
         });
-        lines.push(`  L${lap.num} ${summarise(samples)}${parts.length ? " | " + parts.join(" ") : ""}`);
+        lines.push(`  ${lapName(lap)} ${summarise(samples)}${parts.length ? " | " + parts.join(" ") : ""}`);
       }
     }
     return lines.join("\n");
@@ -2458,15 +2476,16 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     const ideal = rows.length && rows.every((r) => Number.isFinite(r.best)) ? rows.reduce((s, r) => s + r.best, 0) : NaN;
     const bestActual = session.length ? Math.min(...session.map((l) => l.duration)) : NaN;
     const delta = ideal - bestActual;
-    const makeup = rows.map((r) => `S${r.index} ${formatLap(r.best)} from L${r.bestLap}`).join("  +  ");
-    const skipped = (state.log?.laps.length ?? 0) - session.length;
+    const makeup = rows.map((r) => `S${r.index} ${formatLap(r.best)} from ${nameOfId(r.bestLap)}`).join("  +  ");
+    const skipped = everyLap().length - session.length;
     const deltaText = !rows.length ? "Add at least one split" : !Number.isFinite(delta) ? "" : delta < -5e-4 ? `${formatLap(delta)} vs best lap` : delta > 5e-4 ? `+${formatLap(delta)} vs best lap` : "matches the best lap";
     app.innerHTML = `
     <header class="bar">
       <h1>Sim Motorsport Data</h1>
       <button id="open">Open file</button>
+      <button id="compare">${state.compare ? "Remove compare" : "Compare file"}</button>
       <button id="grok">Grok</button>
-      <span class="meta">${log.fileName} \xB7 ${log.vehicle} \xB7 ${log.track}</span>
+      <span class="meta">${log.fileName}${state.compare ? " vs " + state.compare.fileName : ""} \xB7 ${log.vehicle} \xB7 ${log.track}</span>
     </header>
     <div class="layout">
       <aside>
@@ -2495,7 +2514,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
           <p class="sub">${log.distanceNote}</p>
           <div id="bar" class="splitbar"></div>
           <div id="chips" class="chips"></div>
-          <p class="hint">Click the bar to add a split. Drag a marker to move it. The theoretical best uses every full lap in this session, not only the laps drawn on the graph.</p>
+          <p class="hint">Click the bar to add a split. Drag a marker to move it. ${state.compare ? "File B laps are the dashed lines. The theoretical best can use a sector from either file." : "The theoretical best uses every full lap in this session, not only the laps drawn on the graph."}</p>
           <div id="table"></div>
         </section>
         <p id="readout" class="readout"><span class="hint">Move across a graph. Channel values line up here.</span></p>
@@ -2504,15 +2523,27 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     </div>
     ${state.grok ? grokPanel() : ""}`;
     document.getElementById("open").onclick = pick;
+    document.getElementById("compare").onclick = () => {
+      if (state.compare) {
+        state.compare = null;
+        state.laps = state.laps.filter((id) => id.startsWith("A"));
+        if (!state.anchor || state.anchor.startsWith("B")) state.anchor = state.laps[0] ?? null;
+        render();
+        return;
+      }
+      pickTarget = "B";
+      picker.click();
+    };
     document.getElementById("grok").onclick = () => {
       state.grok = !state.grok;
       render();
     };
     document.getElementById("flying").onclick = () => {
-      const q = fastest(log.laps).duration;
-      const flying = log.laps.filter((l) => l.duration < q * 1.12);
-      state.laps = flying.map((l) => l.num);
-      state.anchor = fastest(flying).num;
+      const pool = everyLap();
+      const q = fastest(pool).duration;
+      const flying = pool.filter((l) => l.duration < q * 1.12);
+      state.laps = flying.map((l) => l.id);
+      state.anchor = fastest(flying).id;
       render();
     };
     document.getElementById("place").onclick = () => {
@@ -2561,20 +2592,29 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       chBox.textContent = "No channel matches that search.";
     }
     const lapBox = document.getElementById("laps");
-    log.laps.forEach((lap, index) => {
-      const row = document.createElement("div");
-      row.className = "laprow";
-      row.innerHTML = `<label><input type="checkbox" ${state.laps.includes(lap.num) ? "checked" : ""}><i style="background:${lapColor(index)}"></i><span>L${lap.num} ${formatLap(lap.duration)}</span></label><button class="${anchor?.num === lap.num ? "on" : ""}">Ref</button>`;
-      row.querySelector("input").onchange = () => {
-        state.laps = state.laps.includes(lap.num) ? state.laps.filter((n) => n !== lap.num) : [...state.laps, lap.num];
-        render();
-      };
-      row.querySelector("button").onclick = () => {
-        state.anchor = lap.num;
-        render();
-      };
-      lapBox.appendChild(row);
-    });
+    const paintLaps = (title, list) => {
+      if (state.compare) {
+        const heading = document.createElement("h2");
+        heading.textContent = title;
+        lapBox.appendChild(heading);
+      }
+      list.forEach((lap) => {
+        const row = document.createElement("div");
+        row.className = "laprow";
+        row.innerHTML = `<label><input type="checkbox" ${state.laps.includes(lap.id) ? "checked" : ""}><i style="background:${colorOf(lap)}"></i><span>${lapName(lap)} ${formatLap(lap.duration)}</span></label><button class="${anchor?.id === lap.id ? "on" : ""}">Ref</button>`;
+        row.querySelector("input").onchange = () => {
+          state.laps = state.laps.includes(lap.id) ? state.laps.filter((id) => id !== lap.id) : [...state.laps, lap.id];
+          render();
+        };
+        row.querySelector("button").onclick = () => {
+          state.anchor = lap.id;
+          render();
+        };
+        lapBox.appendChild(row);
+      });
+    };
+    paintLaps(log.fileName, log.laps);
+    if (state.compare) paintLaps(state.compare.fileName, state.compare.laps);
     const bar = document.getElementById("bar");
     const sorted = [...state.splits].sort((a, b) => a - b);
     bar.innerHTML = `<div class="track"></div>` + sorted.map((f, i) => `<div class="mark" style="left:${f * 100}%"><b></b><span>${i + 1}</span></div>`).join("");
@@ -2627,7 +2667,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     const splitTimes = anchor ? [...state.splits].sort((a, b) => a - b).map((f) => timeAtFraction(anchor, f)) : [];
     const plots = document.getElementById("plots");
     const shown = state.keys.map((k) => log.channels.find((c) => c.key === k)).filter((c) => !!c).slice(0, 8);
-    const anchorIndex = anchor ? laps.findIndex((l) => l.num === anchor.num) : -1;
+    const anchorIndex = anchor ? laps.findIndex((l) => l.id === anchor.id) : -1;
     const drawn = [];
     const timeOf = (e, canvas) => {
       const r = canvas.getBoundingClientRect();
@@ -2671,11 +2711,15 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       const canvas = document.createElement("canvas");
       wrap.appendChild(canvas);
       plots.appendChild(wrap);
-      const series = laps.map((lap) => ({
-        color: lapColor(log.laps.findIndex((x) => x.num === lap.num)),
-        samples: downsample(sliceChannel(ch.channel, lap.startMs, lap.endMs), 700),
-        scale: ch.scale
-      }));
+      const series = laps.map((lap) => {
+        const src = (lap.side === "B" ? state.compare : log)?.channels.find((item2) => item2.key === ch.key);
+        return {
+          color: colorOf(lap),
+          dash: lap.side === "B",
+          samples: src ? downsample(sliceChannel(src.channel, lap.startMs, lap.endMs), 700) : [],
+          scale: src?.scale ?? ch.scale
+        };
+      });
       const item = {
         canvas,
         wrap,
@@ -2706,10 +2750,10 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       };
     }
     if (rows.length && session.length) {
-      const head = `<tr><th>Sector</th><th>Track</th>${session.map((l) => `<th>L${l.num}</th>`).join("")}<th>Best</th></tr>`;
+      const head = `<tr><th>Sector</th><th>Track</th>${session.map((l) => `<th>${lapName(l)}</th>`).join("")}<th>Best</th></tr>`;
       const body = rows.map((row) => {
-        const cells = row.times.map((t, i) => `<td class="${session[i].num === row.bestLap ? "best" : ""}">${formatLap(t)}</td>`).join("");
-        return `<tr><td>S${row.index}</td><td>${(row.from * 100).toFixed(0)}\u2013${(row.to * 100).toFixed(0)}%</td>${cells}<td class="best">L${row.bestLap} ${formatLap(row.best)}</td></tr>`;
+        const cells = row.times.map((t, i) => `<td class="${session[i].id === row.bestLap ? "best" : ""}">${formatLap(t)}</td>`).join("");
+        return `<tr><td>S${row.index}</td><td>${(row.from * 100).toFixed(0)}\u2013${(row.to * 100).toFixed(0)}%</td>${cells}<td class="best">${nameOfId(row.bestLap)} ${formatLap(row.best)}</td></tr>`;
       }).join("");
       const foot = `<tr class="foot"><td colspan="2">Theoretical best</td>${session.map((l) => `<td>${formatLap(l.duration)}</td>`).join("")}<td class="best">${formatLap(ideal)}</td></tr>`;
       document.getElementById("table").innerHTML = `<table>${head}${body}${foot}</table>`;
@@ -2813,7 +2857,9 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
           started = true;
         } else ctx.lineTo(x, yy);
       }
+      ctx.setLineDash(line.dash ? [5, 3] : []);
       ctx.stroke();
+      ctx.setLineDash([]);
     }
     ctx.restore();
     ctx.setLineDash([3, 3]);
@@ -2852,31 +2898,48 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     ctx.font = "600 12px sans-serif";
     ctx.fillText(unit ? `${title}  \xB7  ${unit}` : title, pad.l, 14);
   }
+  var BCOLORS = ["#7dd3fc", "#c4b5fd", "#fb7185", "#fde68a", "#86efac", "#e2e8f0", "#67e8f9", "#f9a8d4"];
+  function colorOf(lap) {
+    const list = lap.side === "B" ? state.compare?.laps : state.log?.laps;
+    const index = Math.max(0, list?.findIndex((item) => item.id === lap.id) ?? 0);
+    return lap.side === "B" ? BCOLORS[index % BCOLORS.length] : lapColor(index);
+  }
   var picker = document.createElement("input");
   picker.type = "file";
   picker.accept = ".xrk,.xrz,.vbo";
   picker.style.display = "none";
   document.body.appendChild(picker);
+  var pickTarget = "A";
   picker.onchange = async () => {
     const file = picker.files?.[0];
+    const target = pickTarget;
+    pickTarget = "A";
     picker.value = "";
     if (!file) return;
     try {
       const buf = await file.arrayBuffer();
       const parsed = file.name.toLowerCase().endsWith(".vbo") ? parseVbo(new TextDecoder().decode(buf), file.name) : parseXrk(new Uint8Array(buf));
-      const prepared = prepare(parsed, file.name);
+      const prepared = prepare(parsed, file.name, target);
       if (!prepared.laps.length) {
         alert("No laps with a usable distance trace were found.");
         return;
       }
+      const quick = fastest(prepared.laps).duration;
+      const flying = prepared.laps.filter((l) => l.duration < quick * 1.12);
+      const ids = (flying.length ? flying : prepared.laps).map((l) => l.id);
+      if (target === "B") {
+        state.compare = prepared;
+        state.laps = [...state.laps.filter((id) => id.startsWith("A")), ...ids];
+        render();
+        return;
+      }
       state.log = prepared;
+      state.compare = null;
       const match = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /throttle/i, /tps/i, /gear/i];
       const defaults = prepared.channels.filter((c) => match.some((r) => r.test(c.label) || r.test(c.key))).slice(0, 5);
       state.keys = (defaults.length ? defaults : prepared.channels.slice(0, 3)).map((c) => c.key);
-      const quick = fastest(prepared.laps).duration;
-      const flying = prepared.laps.filter((l) => l.duration < quick * 1.12);
-      state.laps = (flying.length ? flying : prepared.laps).map((l) => l.num);
-      state.anchor = fastest(flying.length ? flying : prepared.laps).num;
+      state.laps = ids;
+      state.anchor = fastest(flying.length ? flying : prepared.laps).id;
       const saved = localStorage.getItem("lap-splits:" + prepared.track);
       state.splits = [];
       if (saved) {
