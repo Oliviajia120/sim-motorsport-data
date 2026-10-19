@@ -46,6 +46,13 @@ th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left;fo
 th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
 .best{color:#3ddc97}
 .foot td{background:#22262c}
+.grok-panel{position:fixed;top:64px;right:12px;bottom:78px;width:min(380px,calc(100vw - 24px));background:#181b1f;border:1px solid #e85d04;border-radius:6px;z-index:40;display:flex;flex-direction:column;gap:.4rem;padding:.7rem}
+.grok-panel input,.grok-panel textarea{width:100%;background:#101214;color:#e7ebef;border:1px solid #323840;border-radius:4px;padding:.4rem}
+.grok-panel textarea{min-height:4.2rem;resize:vertical}
+.grok-log{flex:1;overflow:auto;min-height:0}
+.grok-log p{margin:.35rem 0;white-space:pre-wrap}
+.grok-log .me{color:#f0c14d}
+.grok-panel a{color:#e85d04}
 @media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:40vh}}
 </style>
 </head>
@@ -2107,7 +2114,9 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     if (out[out.length - 1] !== last2) out.push(last2);
     return out;
   }
-  var state = { log: null, keys: [], laps: [], anchor: null, splits: [], place: false, cursor: null, equal: 4, drag: null };
+  var state = { log: null, keys: [], laps: [], anchor: null, splits: [], place: false, cursor: null, equal: 4, drag: null, grok: false };
+  var grokChat = [];
+  var grokBusy = false;
   var app = document.getElementById("app");
   function fastest(laps) {
     return laps.reduce((b, l) => l.duration < b.duration ? l : b);
@@ -2159,6 +2168,101 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     if (!state.log) return;
     localStorage.setItem("lap-splits:" + state.log.track, JSON.stringify(state.splits));
   }
+  function sessionBrief() {
+    const log = state.log;
+    if (!log) return "No session is open.";
+    const laps = comparedLaps();
+    const rows = sectors();
+    const lines = [
+      `File: ${log.fileName}`,
+      `Vehicle: ${log.vehicle}`,
+      `Track: ${log.track}`,
+      `Laps: ${laps.map((l) => `L${l.num} ${formatLap(l.duration)}`).join(", ")}`
+    ];
+    if (!rows.length) lines.push("No splits are set, so there is no theoretical best yet.");
+    else {
+      const ideal = rows.every((r) => Number.isFinite(r.best)) ? rows.reduce((s, r) => s + r.best, 0) : NaN;
+      lines.push(`Theoretical best: ${formatLap(ideal)}`);
+      for (const row of rows) {
+        const each = laps.map((l, i) => `L${l.num} ${formatLap(row.times[i])}`).join(", ");
+        lines.push(`S${row.index} ${(row.from * 100).toFixed(0)}-${(row.to * 100).toFixed(0)}% best ${formatLap(row.best)} from L${row.bestLap}. ${each}`);
+      }
+    }
+    lines.push(`Channels selected: ${state.keys.join(", ") || "none"}`);
+    return lines.join("\n");
+  }
+  function esc(s) {
+    const amp = String.fromCharCode(38);
+    return s.replace(/[&<>"]/g, (c) => {
+      if (c === amp) return amp + "amp;";
+      if (c === "<") return amp + "lt;";
+      if (c === ">") return amp + "gt;";
+      return amp + "quot;";
+    });
+  }
+  function grokPanel() {
+    let key = "";
+    let model = "grok-4";
+    try {
+      key = localStorage.getItem("smd-grok-key") || "";
+      model = localStorage.getItem("smd-grok-model") || "grok-4";
+    } catch {
+    }
+    const log = grokChat.map((m) => `<p class="${m.role === "user" ? "me" : "bot"}">${esc(m.content)}</p>`).join("");
+    return `<aside class="grok-panel">
+    <div class="row"><h2>Grok</h2><button id="grok-close" class="link">Close</button></div>
+    <p class="hint">Uses your own xAI API key from <a href="https://console.x.ai" target="_blank" rel="noopener">console.x.ai</a>. The key stays in this browser and is not saved on GitHub.</p>
+    <input id="grok-key" type="password" placeholder="xAI API key" value="${esc(key)}" autocomplete="off">
+    <input id="grok-model" value="${esc(model)}" autocomplete="off">
+    <div class="grok-log">${log || "<p class='hint'>Ask about the open session. The lap times and theoretical best are sent with the question.</p>"}${grokBusy ? "<p class='hint'>Thinking...</p>" : ""}</div>
+    <textarea id="grok-q" placeholder="Ask about this session"></textarea>
+    <div class="tools">
+      <button id="grok-send">Ask</button>
+      <button id="grok-brief">Send the session</button>
+      <button id="grok-copy">Copy brief</button>
+    </div>
+  </aside>`;
+  }
+  async function askGrok(question) {
+    const keyEl = document.getElementById("grok-key");
+    const modelEl = document.getElementById("grok-model");
+    const key = keyEl?.value.trim() || "";
+    const model = modelEl?.value.trim() || "grok-4";
+    try {
+      localStorage.setItem("smd-grok-key", key);
+      localStorage.setItem("smd-grok-model", model);
+    } catch {
+    }
+    if (!key) {
+      grokChat.push({ role: "assistant", content: "Paste an xAI API key first. The login for this chat is not an API key. Create one at console.x.ai. It stays in this browser only." });
+      render();
+      return;
+    }
+    grokChat.push({ role: "user", content: question });
+    grokBusy = true;
+    render();
+    try {
+      const res = await fetch("https://api.x.ai/v1/chat/completions", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: "Bearer " + key },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: "You are a motorcycle racing engineer reading AIM telemetry for a coach. Use only the session below. Name the lap and the sector. If a channel is not in the brief, say you cannot see it.\n\n" + sessionBrief() },
+            ...grokChat
+          ]
+        })
+      });
+      const data = await res.json().catch(() => ({}));
+      const errText = data?.error?.message || data?.error || "";
+      const answer = data?.choices?.[0]?.message?.content;
+      grokChat.push({ role: "assistant", content: res.ok && answer ? answer : `Grok did not answer (${res.status}). ${errText || "Check the key and the model name."}` });
+    } catch (err) {
+      grokChat.push({ role: "assistant", content: err instanceof Error ? err.message : "Could not reach Grok." });
+    }
+    grokBusy = false;
+    render();
+  }
   function render() {
     const log = state.log;
     if (!log) {
@@ -2184,6 +2288,7 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
     <header class="bar">
       <h1>Sim Motorsport Data</h1>
       <button id="open">Open .xrk</button>
+      <button id="grok">Grok</button>
       <span class="meta">${log.fileName} \xB7 ${log.vehicle} \xB7 ${log.track}</span>
     </header>
     <div class="layout">
@@ -2218,8 +2323,13 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
         <p id="readout" class="readout">Move the mouse across a graph. A white line tracks every graph, and this bar shows the reference-lap value.</p>
         <div id="plots"></div>
       </main>
-    </div>`;
+    </div>
+    ${state.grok ? grokPanel() : ""}`;
     document.getElementById("open").onclick = pick;
+    document.getElementById("grok").onclick = () => {
+      state.grok = !state.grok;
+      render();
+    };
     document.getElementById("flying").onclick = () => {
       const q = fastest(log.laps).duration;
       const flying = log.laps.filter((l) => l.duration < q * 1.12);
@@ -2396,6 +2506,30 @@ th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
       }).join("");
       const foot = `<tr class="foot"><td colspan="2">Theoretical best</td>${session.map((l) => `<td>${formatLap(l.duration)}</td>`).join("")}<td class="best">${formatLap(ideal)}</td></tr>`;
       document.getElementById("table").innerHTML = `<table>${head}${body}${foot}</table>`;
+    }
+    if (state.grok) {
+      document.getElementById("grok-close").onclick = () => {
+        state.grok = false;
+        render();
+      };
+      document.getElementById("grok-send").onclick = () => {
+        const q = document.getElementById("grok-q").value.trim();
+        if (!q || grokBusy) return;
+        void askGrok(q);
+      };
+      document.getElementById("grok-brief").onclick = () => {
+        if (grokBusy) return;
+        void askGrok("Read this session. Give the theoretical best, which lap owns each sector, and what is worth checking next.");
+      };
+      document.getElementById("grok-copy").onclick = async () => {
+        try {
+          await navigator.clipboard.writeText(sessionBrief());
+          grokChat.push({ role: "assistant", content: "Session brief copied. Paste it into the Grok chat if you are not using an API key." });
+        } catch {
+          grokChat.push({ role: "assistant", content: sessionBrief() });
+        }
+        render();
+      };
     }
   }
   function draw(canvas, wrap, title, unit, series, xMax, splitTimes, cursor, cursorText) {
