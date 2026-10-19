@@ -302,8 +302,17 @@ function anchorLap() {
   return laps.find((l) => l.num === state.anchor) ?? fastest(laps);
 }
 
+function comparedLaps() {
+  const all = state.log?.laps ?? [];
+  if (all.length < 2) return all;
+  const totals = all.map((l) => l.total).sort((a, b) => a - b);
+  const median = totals[Math.floor((totals.length - 1) / 2)] || 1;
+  const full = all.filter((l) => l.total >= median * 0.85);
+  return full.length ? full : all;
+}
+
 function sectors() {
-  const laps = chosen();
+  const laps = comparedLaps();
   if (!state.splits.length || !laps.length) return [];
   const bounds = [0, ...[...state.splits].sort((a, b) => a - b), 1];
   const rows = [];
@@ -314,7 +323,7 @@ function sectors() {
     let best = Infinity;
     let bestLap = laps[0]!.num;
     times.forEach((t, i) => {
-      if (t < best) {
+      if (t > 0.05 && t < best) {
         best = t;
         bestLap = laps[i]!.num;
       }
@@ -348,11 +357,14 @@ function render() {
     return;
   }
   const laps = chosen();
+  const session = comparedLaps();
   const anchor = anchorLap();
   const rows = sectors();
-  const ideal = rows.reduce((s, r) => s + r.best, 0);
-  const bestActual = laps.length ? Math.min(...laps.map((l) => l.duration)) : NaN;
+  const ideal = rows.length && rows.every((r) => Number.isFinite(r.best)) ? rows.reduce((s, r) => s + r.best, 0) : NaN;
+  const bestActual = session.length ? Math.min(...session.map((l) => l.duration)) : NaN;
   const delta = ideal - bestActual;
+  const makeup = rows.map((r) => `S${r.index} ${formatLap(r.best)} from L${r.bestLap}`).join("  +  ");
+  const skipped = (state.log?.laps.length ?? 0) - session.length;
   const deltaText = !rows.length ? "Add at least one split" : !Number.isFinite(delta) ? "" : delta < -0.0005 ? `${formatLap(delta)} vs best lap` : delta > 0.0005 ? `+${formatLap(delta)} vs best lap` : "matches the best lap";
 
   app.innerHTML = `
@@ -372,9 +384,10 @@ function render() {
         <section class="card">
           <div class="idealrow">
             <div>
-              <div class="kicker">Ideal lap</div>
-              <div class="ideal">${rows.length && laps.length ? formatLap(ideal) : "—"}</div>
-              <div class="sub">${rows.length ? `Best full lap ${formatLap(bestActual)} · ${deltaText}` : deltaText}</div>
+              <div class="kicker">Theoretical best</div>
+              <div class="ideal">${rows.length && session.length ? formatLap(ideal) : "—"}</div>
+              <div class="sub">${rows.length ? makeup : deltaText}</div>
+              <div class="sub">${rows.length ? `Best full lap ${formatLap(bestActual)} · ${deltaText} · ${session.length} laps` : ""}${skipped > 0 ? ` · ${skipped} short lap${skipped === 1 ? "" : "s"} left out` : ""}</div>
             </div>
             <div class="tools">
               <button id="place" class="${state.place ? "on" : ""}">${state.place ? "Click a graph to drop a split" : "Place on graph"}</button>
@@ -386,11 +399,11 @@ function render() {
           <p class="sub">${log.distanceNote}</p>
           <div id="bar" class="splitbar"></div>
           <div id="chips" class="chips"></div>
-          <p class="hint">Click the bar to add a split. Drag a marker to move it. Lines follow reference lap ${anchor ? "L" + anchor.num : ""}.</p>
+          <p class="hint">Click the bar to add a split. Drag a marker to move it. The theoretical best uses every full lap in this session, not only the laps drawn on the graph.</p>
+          <div id="table"></div>
         </section>
         <p id="readout" class="readout">Move the mouse across a graph. A white line tracks every graph, and this bar shows the reference-lap value.</p>
         <div id="plots"></div>
-        <div id="table"></div>
       </main>
     </div>`;
 
@@ -577,17 +590,17 @@ function render() {
     };
   }
 
-  if (rows.length && laps.length) {
-    const head = `<tr><th>Sector</th><th>Track</th>${laps.map((l) => `<th>L${l.num}</th>`).join("")}<th>Best</th></tr>`;
+  if (rows.length && session.length) {
+    const head = `<tr><th>Sector</th><th>Track</th>${session.map((l) => `<th>L${l.num}</th>`).join("")}<th>Best</th></tr>`;
     const body = rows
       .map((row) => {
         const cells = row.times
-          .map((t, i) => `<td class="${laps[i]!.num === row.bestLap ? "best" : ""}">${formatLap(t)}</td>`)
+          .map((t, i) => `<td class="${session[i]!.num === row.bestLap ? "best" : ""}">${formatLap(t)}</td>`)
           .join("");
         return `<tr><td>S${row.index}</td><td>${(row.from * 100).toFixed(0)}–${(row.to * 100).toFixed(0)}%</td>${cells}<td class="best">L${row.bestLap} ${formatLap(row.best)}</td></tr>`;
       })
       .join("");
-    const foot = `<tr class="foot"><td colspan="2">Ideal</td>${laps.map((l) => `<td>${formatLap(l.duration)}</td>`).join("")}<td class="best">${formatLap(ideal)}</td></tr>`;
+    const foot = `<tr class="foot"><td colspan="2">Theoretical best</td>${session.map((l) => `<td>${formatLap(l.duration)}</td>`).join("")}<td class="best">${formatLap(ideal)}</td></tr>`;
     document.getElementById("table")!.innerHTML = `<table>${head}${body}${foot}</table>`;
   }
 }
