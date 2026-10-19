@@ -1,0 +1,2491 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sim Motorsport Data</title>
+<style>
+*{box-sizing:border-box}
+html,body{margin:0;background:#101214;color:#e7ebef;font-family:Segoe UI,system-ui,sans-serif;height:100%}
+button,input{font:inherit}
+button{background:#22262c;color:#e7ebef;border:0;border-radius:4px;padding:0.45rem 0.7rem;cursor:pointer}
+button.on,header button{background:#e85d04;color:#1a0d04;font-weight:650}
+h1{font-size:1.1rem;margin:0}
+h2{font-size:0.72rem;letter-spacing:.06em;text-transform:uppercase;color:#8e98a3;margin:0 0 .4rem}
+.bar{display:flex;gap:.7rem;align-items:center;padding:.7rem 1rem;background:#181b1f;border-bottom:1px solid #323840;flex-wrap:wrap}
+.meta{color:#8e98a3;font-family:ui-monospace,monospace;font-size:.85rem}
+.empty{max-width:36rem;margin:4rem auto;padding:0 1.2rem}
+.empty h2{font-size:1.7rem;color:#e7ebef;letter-spacing:0;text-transform:none}
+.layout{display:flex;min-height:calc(100vh - 58px)}
+aside{width:280px;background:#181b1f;border-right:1px solid #323840;padding:.8rem;overflow:auto}
+main{flex:1;padding:.8rem;overflow:auto;min-width:0}
+.list label,.laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
+.laprow{display:flex;align-items:center;justify-content:space-between;gap:.4rem}
+.laprow i{width:.65rem;height:.65rem;border-radius:99px;display:inline-block}
+.row{display:flex;justify-content:space-between;align-items:center}
+.link{background:transparent;color:#e85d04;padding:0}
+.card{background:#181b1f;border:1px solid #323840;border-radius:6px;padding:.8rem;margin-bottom:.7rem}
+.idealrow{display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap}
+.kicker{font-size:.72rem;letter-spacing:.06em;text-transform:uppercase;color:#8e98a3}
+.ideal{font-family:ui-monospace,monospace;font-size:2rem;color:#3ddc97}
+.sub,.hint{color:#8e98a3;font-size:.85rem}
+.tools{display:flex;gap:.4rem;flex-wrap:wrap;align-items:center}
+.tools input{width:3rem;background:transparent;color:#e7ebef;border:0}
+.splitbar{position:relative;height:3rem;background:#101214;border-radius:4px;cursor:crosshair}
+.track{position:absolute;left:0;right:0;top:50%;height:4px;background:#323840;transform:translateY(-50%)}
+.mark{position:absolute;top:4px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;pointer-events:none}
+.mark b{width:2px;height:1.2rem;background:#e85d04;display:block}
+.mark span{color:#e85d04;font-size:.75rem;font-family:ui-monospace,monospace}
+.chips{display:flex;gap:.4rem;flex-wrap:wrap;margin-top:.4rem}
+.plot{border:1px solid #323840;border-radius:4px;margin-bottom:.45rem;overflow:hidden;background:#181b1f}
+table{width:100%;border-collapse:collapse;font-size:.85rem;background:#181b1f}
+th,td{padding:.4rem .6rem;border-bottom:1px solid #323840;text-align:right;font-family:ui-monospace,monospace}
+th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left;font-family:Segoe UI,system-ui,sans-serif}
+th{color:#8e98a3;font-size:.72rem;letter-spacing:.04em;text-transform:uppercase}
+.best{color:#3ddc97}
+.foot td{background:#22262c}
+@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:40vh}}
+</style>
+</head>
+<body>
+<div id="app"></div>
+<script>"use strict";
+(() => {
+  // node_modules/aim-xrk/dist/constants.js
+  function tokdec(s) {
+    let v = 0;
+    for (let i = s.length - 1; i >= 0; i--)
+      v = v * 256 + s.charCodeAt(i);
+    return v >>> 0;
+  }
+  var UNIT_MAP = /* @__PURE__ */ new Map([
+    [1, ["%", 2]],
+    [3, ["g", 2]],
+    [4, ["deg", 1]],
+    [5, ["deg/s", 1]],
+    [6, ["", 0]],
+    [9, ["Hz", 0]],
+    [11, ["", 0]],
+    [12, ["mm", 0]],
+    [14, ["bar", 2]],
+    [15, ["rpm", 0]],
+    [16, ["km/h", 0]],
+    [17, ["C", 1]],
+    [18, ["ms", 0]],
+    [19, ["Nm", 0]],
+    [20, ["km/h", 0]],
+    [21, ["mV", 1]],
+    [22, ["l", 1]],
+    [24, ["l/s", 0]],
+    [26, ["time?", 0]],
+    [27, ["A", 0]],
+    [30, ["lambda", 2]],
+    [31, ["gear", 0]],
+    [33, ["%", 2]],
+    [43, ["kg", 3]]
+  ]);
+  var DECODERS = /* @__PURE__ */ new Map([
+    [0, { stype: "i", interpolate: false }],
+    // Master Clock on M4GT4
+    [1, { stype: "H", interpolate: true }],
+    // plain uint16 (e.g. StartRec)
+    [3, { stype: "i", interpolate: false }],
+    // Master Clock on ScottE46
+    [4, { stype: "h", interpolate: false }],
+    [6, { stype: "f", interpolate: true }],
+    // standard float32
+    [8, { stype: "i", interpolate: false }],
+    // iGPS reference
+    [11, { stype: "h", interpolate: false }],
+    [12, { stype: "i", interpolate: false }],
+    // Predictive Time
+    [13, { stype: "B", interpolate: false }],
+    // status field
+    [15, { stype: "H", interpolate: false, fixup: "gear" }],
+    // gear lookup
+    [20, { stype: "H", interpolate: true, fixup: "fp16" }],
+    // float16 as uint16
+    [22, { stype: "i", interpolate: false }],
+    // Lap Time (variant)
+    [24, { stype: "i", interpolate: false }],
+    // Best Run Diff
+    [26, { stype: "i", interpolate: false }],
+    // Total Odometer
+    [27, { stype: "i", interpolate: false }],
+    // Reset Odometer
+    [31, { stype: "i", interpolate: false }],
+    // Lap Time
+    [32, { stype: "i", interpolate: false }],
+    // Roll Time
+    [33, { stype: "i", interpolate: false }],
+    // Best Time
+    [37, { stype: "i", interpolate: false }],
+    // GPS_Hours
+    [38, { stype: "i", interpolate: false }],
+    // GPS_Date
+    [39, { stype: "i", interpolate: false }]
+    // GPS_Time
+  ]);
+  var MANUAL_DECODERS = /* @__PURE__ */ new Map([
+    ["Calculated_Gear", { stype: "Q", interpolate: false, fixup: "calcGear" }],
+    ["PreCalcGear", { stype: "Q", interpolate: false, fixup: "calcGear" }]
+  ]);
+  var STYPE_SIZE = {
+    i: 4,
+    H: 2,
+    h: 2,
+    f: 4,
+    B: 1,
+    Q: 8
+  };
+  var LOGGER_MODELS = /* @__PURE__ */ new Map([
+    [649, "MXP 1.3"],
+    [793, "MXm"]
+  ]);
+  var FUNCTION_MAP = /* @__PURE__ */ new Map([
+    // key = display_format * 256 + unit_type_byte
+    [0 * 256 + 1, "Percent"],
+    [0 * 256 + 3, "Acceleration"],
+    [0 * 256 + 4, "Angle"],
+    [0 * 256 + 5, "Angular Rate"],
+    [0 * 256 + 11, "Number"],
+    [0 * 256 + 12, "Distance"],
+    [0 * 256 + 14, "Pressure"],
+    [0 * 256 + 15, "Engine RPM"],
+    [0 * 256 + 16, "Rear Wheel Speed"],
+    [0 * 256 + 17, "Temperature"],
+    [0 * 256 + 18, "Time"],
+    [0 * 256 + 21, "Voltage"],
+    [0 * 256 + 145, "Exhaust Temperature"],
+    [0 * 256 + 154, "Lap Time"],
+    [1 * 256 + 149, "Battery Voltage"],
+    [2 * 256 + 154, "Total Odometer"],
+    [3 * 256 + 26, "Reset Odometer"],
+    [5 * 256 + 26, "Best Lap Time"],
+    [5 * 256 + 154, "Rolling Lap Time"],
+    [6 * 256 + 6, "Gear"],
+    [6 * 256 + 31, "Gear"],
+    [9 * 256 + 30, "Lambda"],
+    [11 * 256 + 145, "Oil Temperature"],
+    [13 * 256 + 132, "Steering Angle"],
+    [14 * 256 + 129, "Percentage Throttle Load"],
+    [16 * 256 + 145, "Water Temperature"],
+    [17 * 256 + 3, "Inline Acceleration"],
+    [17 * 256 + 5, "Roll Rate"],
+    [17 * 256 + 131, "Lateral Acceleration"],
+    [17 * 256 + 133, "Pitch Rate"],
+    [18 * 256 + 3, "Vertical Acceleration"],
+    [18 * 256 + 5, "Yaw Rate"],
+    [21 * 256 + 18, "Master Clock"],
+    [26 * 256 + 33, "Device Brightness"],
+    [27 * 256 + 146, "Best Run Diff"],
+    [28 * 256 + 18, "Prev Lap Diff"],
+    [28 * 256 + 146, "Ref Lap Diff"],
+    [35 * 256 + 146, "Best Today Diff"],
+    [128 * 256 + 16, "Vehicle Speed"],
+    [128 * 256 + 145, "Intake Air Temperature"],
+    [128 * 256 + 154, "Lap Time"],
+    [129 * 256 + 154, "GPS Time"],
+    [130 * 256 + 14, "Brake Circuit Pressure"],
+    [144 * 256 + 145, "Water Temperature"],
+    [145 * 256 + 3, "Inline Acceleration"],
+    [145 * 256 + 131, "Lateral Acceleration"],
+    [146 * 256 + 5, "Yaw Rate"],
+    [169 * 256 + 140, "LF Shock Position"]
+  ]);
+  function resolveFunction(displayFormat, unitTypeByte, configFlags) {
+    if (displayFormat === 0 && unitTypeByte === 17 && configFlags === 1) {
+      return "Device Temperature";
+    }
+    return FUNCTION_MAP.get(displayFormat * 256 + unitTypeByte) ?? "";
+  }
+  var GPS_CHANNEL_NAMES = [
+    "GPS Speed",
+    "GPS Latitude",
+    "GPS Longitude",
+    "GPS Altitude",
+    "GPS_Satellites",
+    "GPS_Fix",
+    "GPS_pDOP",
+    "GPS_Position_Accuracy",
+    "GPS_Velocity_Accuracy",
+    "GPS_InlineAcc",
+    "GPS_LateralAcc",
+    "GPS_Yaw_Rate"
+  ];
+  function nulltermString(bytes) {
+    let end = bytes.indexOf(0);
+    if (end < 0)
+      end = bytes.length;
+    let s = "";
+    for (let i = 0; i < end; i++)
+      s += String.fromCharCode(bytes[i]);
+    return s;
+  }
+  function fp16ToFloat(h) {
+    const sign = h & 32768 ? -1 : 1;
+    const exp = h >> 10 & 31;
+    const frac = h & 1023;
+    if (exp === 0) {
+      return Math.fround(sign * frac * 2 ** -24);
+    }
+    if (exp === 31) {
+      return frac ? NaN : sign * Infinity;
+    }
+    return Math.fround(sign * (1 + frac / 1024) * 2 ** (exp - 15));
+  }
+
+  // node_modules/aim-xrk/dist/channels.js
+  function gearLookup(v) {
+    if (v === 78)
+      return 0;
+    if (v >= 49 && v <= 54)
+      return v - 48;
+    return v;
+  }
+  function readStrided(buf, byteOffset, stride, rows, stype) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    switch (stype) {
+      case "i": {
+        const out = new Int32Array(rows);
+        for (let r = 0; r < rows; r++)
+          out[r] = dv.getInt32(byteOffset + r * stride, true);
+        return out;
+      }
+      case "H": {
+        const out = new Uint16Array(rows);
+        for (let r = 0; r < rows; r++)
+          out[r] = dv.getUint16(byteOffset + r * stride, true);
+        return out;
+      }
+      case "h": {
+        const out = new Int16Array(rows);
+        for (let r = 0; r < rows; r++)
+          out[r] = dv.getInt16(byteOffset + r * stride, true);
+        return out;
+      }
+      case "f": {
+        const out = new Float32Array(rows);
+        for (let r = 0; r < rows; r++)
+          out[r] = dv.getFloat32(byteOffset + r * stride, true);
+        return out;
+      }
+      case "B": {
+        const out = new Uint8Array(rows);
+        for (let r = 0; r < rows; r++)
+          out[r] = buf[byteOffset + r * stride];
+        return out;
+      }
+      case "Q": {
+        const out = new Uint32Array(rows);
+        for (let r = 0; r < rows; r++)
+          out[r] = dv.getUint32(byteOffset + r * stride, true);
+        return out;
+      }
+      default:
+        throw new Error(`unknown stype ${stype}`);
+    }
+  }
+  function readTimecodes(buf, stride, rows, timeOffset) {
+    const dv = new DataView(buf.buffer, buf.byteOffset, buf.byteLength);
+    const out = new Float64Array(rows);
+    for (let r = 0; r < rows; r++)
+      out[r] = dv.getInt32(r * stride, true) - timeOffset;
+    return out;
+  }
+  function applyFixup(values, fixup) {
+    if (fixup === "gear") {
+      const out = new Uint16Array(values.length);
+      for (let i = 0; i < values.length; i++)
+        out[i] = gearLookup(values[i]);
+      return out;
+    }
+    if (fixup === "fp16") {
+      const out = new Float32Array(values.length);
+      for (let i = 0; i < values.length; i++)
+        out[i] = fp16ToFloat(values[i]);
+      return out;
+    }
+    if (fixup === "calcGear") {
+      const out = new Uint32Array(values.length);
+      for (let i = 0; i < values.length; i++) {
+        const x = values[i];
+        out[i] = x & 524288 ? 0 : x >> 16 & 7;
+      }
+      return out;
+    }
+    return values;
+  }
+  function decoderFor(ch) {
+    return MANUAL_DECODERS.get(ch.longName) ?? DECODERS.get(ch.unknown[20]);
+  }
+  function processGroup(g, state2, timeOffset) {
+    g.rows = null;
+    g.timecodes = new Float64Array(0);
+    if (g.index < state2.gc[0].length) {
+      const acc = state2.gc[0][g.index];
+      if (acc.data.len) {
+        g.rows = acc.data.view();
+        g.rowStride = acc.addHelper - 3;
+        const rows = Math.floor(g.rows.length / g.rowStride);
+        g.timecodes = readTimecodes(g.rows, g.rowStride, rows, timeOffset);
+      }
+    }
+    for (const chIdx of g.channels) {
+      const ch = state2.channels[chIdx];
+      if (ch)
+        processChannel(ch, state2, timeOffset);
+    }
+  }
+  function processChannel(ch, state2, timeOffset) {
+    const d = decoderFor(ch);
+    if (!d)
+      return;
+    ch.interpolate = d.interpolate;
+    const sampleSize = STYPE_SIZE[d.stype];
+    if (ch.group) {
+      const grp = ch.group.group;
+      ch.timecodes = grp.timecodes ?? new Float64Array(0);
+      if (grp.rows && grp.timecodes && grp.timecodes.length) {
+        ch.values = readStrided(grp.rows, ch.group.offset, grp.rowStride, grp.timecodes.length, d.stype);
+      } else {
+        ch.values = readStrided(new Uint8Array(0), 0, sampleSize, 0, d.stype);
+      }
+    } else {
+      let viewOffset = 6;
+      let strideOffset = 3;
+      let acc = ch.index < state2.gc[1].length ? state2.gc[1][ch.index] : null;
+      if (!acc || !acc.data.len) {
+        viewOffset = 4;
+        strideOffset = 8;
+        acc = ch.index < state2.gc[2].length ? state2.gc[2][ch.index] : null;
+      }
+      if (acc && acc.data.len) {
+        if (ch.timecodes.length !== 0) {
+          throw new Error(`Can't have both S/c and M records for channel ${ch.longName}`);
+        }
+        const view = acc.data.view();
+        const stride = acc.addHelper - strideOffset;
+        const rows = Math.floor(view.length / stride);
+        ch.timecodes = readTimecodes(view, stride, rows, timeOffset);
+        ch.values = readStrided(view, viewOffset, stride, rows, d.stype);
+      } else {
+        const mAcc = ch.index < state2.gc[3].length ? state2.gc[3][ch.index] : null;
+        if (mAcc && mAcc.timecodes.len) {
+          const n = mAcc.timecodes.len;
+          const tcs = new Float64Array(n);
+          for (let i = 0; i < n; i++)
+            tcs[i] = mAcc.timecodes.buf[i] - timeOffset;
+          ch.timecodes = tcs;
+          ch.values = readStrided(mAcc.data.view(), 0, sampleSize, n, d.stype);
+        } else {
+          ch.timecodes = new Float64Array(0);
+          ch.values = new Float64Array(0);
+        }
+      }
+    }
+    if (d.fixup)
+      ch.values = applyFixup(ch.values, d.fixup);
+    if (ch.units === "V") {
+      const out = new Float64Array(ch.values.length);
+      for (let i = 0; i < ch.values.length; i++)
+        out[i] = ch.values[i] / 1e3;
+      ch.values = out;
+    }
+    ch.hasData = ch.values.length > 0;
+  }
+
+  // node_modules/aim-xrk/dist/inflate.js
+  var MAX_BITS = 15;
+  var BitReader = class {
+    data;
+    pos;
+    // byte position
+    bitBuf = 0;
+    bitCnt = 0;
+    constructor(data, start) {
+      this.data = data;
+      this.pos = start;
+    }
+    /** Read `need` bits LSB-first. Throws RangeError at end of input. */
+    bits(need) {
+      let val = this.bitBuf;
+      while (this.bitCnt < need) {
+        if (this.pos >= this.data.length)
+          throw new RangeError("out of input");
+        val |= this.data[this.pos++] << this.bitCnt;
+        this.bitCnt += 8;
+      }
+      this.bitBuf = val >>> need;
+      this.bitCnt -= need;
+      return val & (1 << need) - 1;
+    }
+    alignByte() {
+      this.bitBuf = 0;
+      this.bitCnt = 0;
+    }
+  };
+  function buildHuffman(lengths, n) {
+    const counts = new Int32Array(MAX_BITS + 1);
+    for (let i = 0; i < n; i++)
+      counts[lengths[i]]++;
+    counts[0] = 0;
+    const offs = new Int32Array(MAX_BITS + 1);
+    for (let len = 1; len <= MAX_BITS; len++)
+      offs[len] = offs[len - 1] + counts[len - 1];
+    const symbols = new Int32Array(n);
+    for (let i = 0; i < n; i++) {
+      if (lengths[i])
+        symbols[offs[lengths[i]]++] = i;
+    }
+    return { counts, symbols };
+  }
+  function decodeSym(br, huff) {
+    let code = 0;
+    let first = 0;
+    let index = 0;
+    for (let len = 1; len <= MAX_BITS; len++) {
+      code |= br.bits(1);
+      const count = huff.counts[len];
+      if (code - first < count)
+        return huff.symbols[index + (code - first)];
+      index += count;
+      first = first + count << 1;
+      code <<= 1;
+    }
+    throw new Error("invalid huffman code");
+  }
+  var LEN_BASE = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258];
+  var LEN_EXTRA = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0];
+  var DIST_BASE = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577];
+  var DIST_EXTRA = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13];
+  var CLEN_ORDER = [16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15];
+  var Output = class {
+    buf;
+    len = 0;
+    constructor(hint) {
+      this.buf = new Uint8Array(Math.max(hint, 64 * 1024));
+    }
+    ensure(extra) {
+      if (this.len + extra <= this.buf.length)
+        return;
+      let cap = this.buf.length * 2;
+      while (cap < this.len + extra)
+        cap *= 2;
+      const next = new Uint8Array(cap);
+      next.set(this.buf.subarray(0, this.len));
+      this.buf = next;
+    }
+    byte(b) {
+      this.ensure(1);
+      this.buf[this.len++] = b;
+    }
+    copy(dist, length) {
+      if (dist > this.len)
+        throw new Error("distance too far back");
+      this.ensure(length);
+      let from = this.len - dist;
+      for (let i = 0; i < length; i++)
+        this.buf[this.len++] = this.buf[from++];
+    }
+    result() {
+      return this.buf.slice(0, this.len);
+    }
+  };
+  var FIXED_LIT = null;
+  var FIXED_DIST = null;
+  function fixedTables() {
+    if (!FIXED_LIT) {
+      const litLens = new Uint8Array(288);
+      litLens.fill(8, 0, 144);
+      litLens.fill(9, 144, 256);
+      litLens.fill(7, 256, 280);
+      litLens.fill(8, 280, 288);
+      FIXED_LIT = buildHuffman(litLens, 288);
+      const distLens = new Uint8Array(30).fill(5);
+      FIXED_DIST = buildHuffman(distLens, 30);
+    }
+    return [FIXED_LIT, FIXED_DIST];
+  }
+  function inflateBlockData(br, out, lit, dist) {
+    for (; ; ) {
+      const sym = decodeSym(br, lit);
+      if (sym < 256) {
+        out.byte(sym);
+      } else if (sym === 256) {
+        return;
+      } else {
+        const li = sym - 257;
+        if (li >= LEN_BASE.length)
+          throw new Error("invalid length symbol");
+        const length = LEN_BASE[li] + br.bits(LEN_EXTRA[li]);
+        const dsym = decodeSym(br, dist);
+        if (dsym >= DIST_BASE.length)
+          throw new Error("invalid distance symbol");
+        const distance = DIST_BASE[dsym] + br.bits(DIST_EXTRA[dsym]);
+        out.copy(distance, length);
+      }
+    }
+  }
+  function dynamicTables(br) {
+    const hlit = br.bits(5) + 257;
+    const hdist = br.bits(5) + 1;
+    const hclen = br.bits(4) + 4;
+    const clens = new Uint8Array(19);
+    for (let i2 = 0; i2 < hclen; i2++)
+      clens[CLEN_ORDER[i2]] = br.bits(3);
+    const clHuff = buildHuffman(clens, 19);
+    const lengths = new Uint8Array(hlit + hdist);
+    let i = 0;
+    while (i < hlit + hdist) {
+      const sym = decodeSym(br, clHuff);
+      if (sym < 16) {
+        lengths[i++] = sym;
+      } else if (sym === 16) {
+        if (i === 0)
+          throw new Error("repeat with no previous length");
+        const prev = lengths[i - 1];
+        let rep = 3 + br.bits(2);
+        while (rep-- && i < hlit + hdist)
+          lengths[i++] = prev;
+      } else if (sym === 17) {
+        let rep = 3 + br.bits(3);
+        while (rep-- && i < hlit + hdist)
+          lengths[i++] = 0;
+      } else {
+        let rep = 11 + br.bits(7);
+        while (rep-- && i < hlit + hdist)
+          lengths[i++] = 0;
+      }
+    }
+    return [buildHuffman(lengths, hlit), buildHuffman(lengths.subarray(hlit), hdist)];
+  }
+  function inflateRaw(data, start = 0, sizeHint = 0) {
+    const br = new BitReader(data, start);
+    const out = new Output(sizeHint || data.length * 4);
+    try {
+      let final = 0;
+      do {
+        final = br.bits(1);
+        const type = br.bits(2);
+        if (type === 0) {
+          br.alignByte();
+          if (br.pos + 4 > data.length)
+            throw new RangeError("out of input");
+          const len = data[br.pos] | data[br.pos + 1] << 8;
+          const nlen = data[br.pos + 2] | data[br.pos + 3] << 8;
+          if ((len ^ 65535) !== nlen)
+            throw new Error("stored block length mismatch");
+          br.pos += 4;
+          if (br.pos + len > data.length)
+            throw new RangeError("out of input");
+          out.ensure(len);
+          out.buf.set(data.subarray(br.pos, br.pos + len), out.len);
+          out.len += len;
+          br.pos += len;
+        } else if (type === 1) {
+          const [lit, dist] = fixedTables();
+          inflateBlockData(br, out, lit, dist);
+        } else if (type === 2) {
+          const [lit, dist] = dynamicTables(br);
+          inflateBlockData(br, out, lit, dist);
+        } else {
+          throw new Error("invalid block type");
+        }
+      } while (!final);
+    } catch {
+    }
+    return out.result();
+  }
+  function isZlib(data) {
+    return data.length >= 2 && data[0] === 120 && (data[1] === 1 || data[1] === 156 || data[1] === 218);
+  }
+  function decompressIfZlib(data) {
+    if (!isZlib(data))
+      return data;
+    return inflateRaw(data, 2, data.length * 6);
+  }
+
+  // node_modules/aim-xrk/dist/gps.js
+  var A = 6378137;
+  var E = 0.08181919084261345;
+  function lla2ecef(latDeg, lonDeg, alt) {
+    const eSq = E * E;
+    const lat = latDeg * (Math.PI / 180);
+    const lon = lonDeg * (Math.PI / 180);
+    const clat = Math.cos(lat);
+    const slat = Math.sin(lat);
+    const N = A / Math.sqrt(1 - eSq * slat * slat);
+    return [
+      (N + alt) * clat * Math.cos(lon),
+      (N + alt) * clat * Math.sin(lon),
+      ((1 - eSq) * N + alt) * slat
+    ];
+  }
+  function ecef2lla(x, y, z) {
+    const e2 = E * E;
+    const e4 = e2 * e2;
+    const p = (x * x + y * y) / (A * A);
+    const q = (1 - e2) / (A * A) * z * z;
+    const r = (p + q - e4) / 6;
+    const s = e4 / 4 * (p * q / (r * r * r));
+    const t = Math.cbrt(1 + s + Math.sqrt(s * (2 + s)));
+    let u = r * (1 + t + 1 / t);
+    const v = Math.sqrt(u * u + e4 * q);
+    u += v;
+    const w = e2 / 2 * ((u - q) / v);
+    const k = Math.sqrt(u + w * w) - w;
+    const D = k * Math.sqrt(x * x + y * y) / (k + e2);
+    const rtDDzz = Math.sqrt(D * D + z * z);
+    return [
+      180 / Math.PI * 2 * Math.atan2(z, D + rtDDzz),
+      180 / Math.PI * Math.atan2(y, x),
+      (k + e2 - 1) / k * rtDDzz
+    ];
+  }
+  function makeGpsChannel(name, units, decPts, interpolate, timecodes, values) {
+    return {
+      index: -1,
+      shortName: "",
+      longName: name,
+      size: 0,
+      units,
+      decPts,
+      interpolate,
+      unknown: new Uint8Array(0),
+      func: "",
+      sourceType: 0,
+      sourceChannelId: 0,
+      deviceTag: "",
+      calValue1: 0,
+      calValue2: 1,
+      displayRangeMin: 0,
+      displayRangeMax: 0,
+      group: null,
+      timecodes,
+      values,
+      hasData: values.length > 0
+    };
+  }
+  function decodeGps(gpsBytes, timeOffset) {
+    if (gpsBytes.length === 0)
+      return [];
+    if (gpsBytes.length % 56 !== 0) {
+      throw new Error(`GPS data length ${gpsBytes.length} is not a multiple of 56`);
+    }
+    const n = gpsBytes.length / 56;
+    const dv = new DataView(gpsBytes.buffer, gpsBytes.byteOffset, gpsBytes.byteLength);
+    const rawTc = new Float64Array(n);
+    for (let i = 0; i < n; i++)
+      rawTc[i] = dv.getInt32(i * 56, true);
+    let nonMonotonic = false;
+    for (let i = 1; i < n; i++) {
+      if (rawTc[i] < rawTc[i - 1]) {
+        nonMonotonic = true;
+        break;
+      }
+    }
+    if (nonMonotonic) {
+      const base = rawTc[0] - (rawTc[0] % 65536 + 65536) % 65536;
+      for (let i = 0; i < n; i++)
+        rawTc[i] = (rawTc[i] % 65536 + 65536) % 65536 + base;
+      let wraps = 0;
+      let prev = rawTc[0];
+      for (let i = 1; i < n; i++) {
+        const cur = rawTc[i];
+        if (cur < prev)
+          wraps += 65536;
+        prev = cur;
+        rawTc[i] = cur + wraps;
+      }
+    }
+    const timecodes = new Float64Array(n);
+    for (let i = 0; i < n; i++)
+      timecodes[i] = rawTc[i] - timeOffset;
+    const speed = new Float64Array(n);
+    const lat = new Float64Array(n);
+    const lon = new Float64Array(n);
+    const alt = new Float64Array(n);
+    const nsat = new Float32Array(n);
+    const fix = new Float32Array(n);
+    const pdop = new Float32Array(n);
+    const posAcc = new Float32Array(n);
+    const velAcc = new Float32Array(n);
+    const heading = new Float64Array(n);
+    for (let i = 0; i < n; i++) {
+      const off = i * 56;
+      const ecefX = dv.getInt32(off + 16, true);
+      const ecefY = dv.getInt32(off + 20, true);
+      const ecefZ = dv.getInt32(off + 24, true);
+      const vx = dv.getInt32(off + 32, true);
+      const vy = dv.getInt32(off + 36, true);
+      const vz = dv.getInt32(off + 40, true);
+      speed[i] = Math.sqrt(vx * vx + vy * vy + vz * vz) / 100;
+      const [la, lo, al] = ecef2lla(ecefX / 100, ecefY / 100, ecefZ / 100);
+      lat[i] = la;
+      lon[i] = lo;
+      alt[i] = al;
+      fix[i] = gpsBytes[off + 14];
+      nsat[i] = gpsBytes[off + 51];
+      pdop[i] = Math.fround(dv.getUint16(off + 48, true) / 100);
+      posAcc[i] = Math.fround(dv.getUint32(off + 28, true) / 100);
+      velAcc[i] = Math.fround(dv.getUint32(off + 44, true) / 100);
+      const latR = la * (Math.PI / 180);
+      const lonR = lo * (Math.PI / 180);
+      const sinLat = Math.sin(latR);
+      const cosLat = Math.cos(latR);
+      const sinLon = Math.sin(lonR);
+      const cosLon = Math.cos(lonR);
+      const vEast = -sinLon * vx + cosLon * vy;
+      const vNorth = -sinLat * cosLon * vx - sinLat * sinLon * vy + cosLat * vz;
+      heading[i] = Math.atan2(vEast, vNorth) * (180 / Math.PI);
+    }
+    const inlineAcc = new Float32Array(n);
+    const yawRate = new Float32Array(n);
+    const yawRateF64 = new Float64Array(n);
+    const lateralAcc = new Float32Array(n);
+    for (let i = 1; i < n; i++) {
+      let dt = (timecodes[i] - timecodes[i - 1]) / 1e3;
+      if (!(dt > 0))
+        dt = Infinity;
+      inlineAcc[i] = Math.fround((speed[i] - speed[i - 1]) / dt / 9.81);
+      let dh = heading[i] - heading[i - 1];
+      if (dh > 180)
+        dh -= 360;
+      if (dh < -180)
+        dh += 360;
+      yawRateF64[i] = dh / dt;
+      yawRate[i] = Math.fround(yawRateF64[i]);
+    }
+    for (let i = 0; i < n; i++) {
+      lateralAcc[i] = Math.fround(speed[i] * yawRateF64[i] * (Math.PI / 180) / 9.81);
+    }
+    return [
+      makeGpsChannel("GPS Speed", "m/s", 1, true, timecodes, speed),
+      makeGpsChannel("GPS Latitude", "deg", 4, true, timecodes, lat),
+      makeGpsChannel("GPS Longitude", "deg", 4, true, timecodes, lon),
+      makeGpsChannel("GPS Altitude", "m", 1, true, timecodes, alt),
+      makeGpsChannel("GPS_Satellites", "", 0, false, timecodes, nsat),
+      makeGpsChannel("GPS_Fix", "", 0, false, timecodes, fix),
+      makeGpsChannel("GPS_pDOP", "", 2, false, timecodes, pdop),
+      makeGpsChannel("GPS_Position_Accuracy", "m", 2, true, timecodes, posAcc),
+      makeGpsChannel("GPS_Velocity_Accuracy", "m/s", 2, true, timecodes, velAcc),
+      makeGpsChannel("GPS_InlineAcc", "g", 2, true, timecodes, inlineAcc),
+      makeGpsChannel("GPS_LateralAcc", "g", 2, true, timecodes, lateralAcc),
+      makeGpsChannel("GPS_Yaw_Rate", "deg/s", 1, true, timecodes, yawRate)
+    ];
+  }
+  function decodeGnfi(gnfiBytes, timeOffset) {
+    if (gnfiBytes.length === 0 || gnfiBytes.length % 32 !== 0)
+      return null;
+    const n = gnfiBytes.length / 32;
+    const dv = new DataView(gnfiBytes.buffer, gnfiBytes.byteOffset, gnfiBytes.byteLength);
+    const out = new Float64Array(n);
+    for (let i = 0; i < n; i++)
+      out[i] = dv.getInt32(i * 32, true) - timeOffset;
+    return out;
+  }
+  function findLaps(xyz, timecodes, sfLat, sfLong) {
+    const n = timecodes.length;
+    if (n < 2)
+      return [];
+    const SO = lla2ecef(sfLat, sfLong, 0);
+    const SD1 = lla2ecef(sfLat, sfLong, 1e3);
+    const SD = [SD1[0] - SO[0], SD1[1] - SO[1], SD1[2] - SO[2]];
+    const sdDotSd = SD[0] * SD[0] + SD[1] * SD[1] + SD[2] * SD[2];
+    const m = n - 1;
+    const Ox = new Float64Array(m);
+    const Oy = new Float64Array(m);
+    const Oz = new Float64Array(m);
+    const Dx = new Float64Array(m);
+    const Dy = new Float64Array(m);
+    const Dz = new Float64Array(m);
+    for (let i = 0; i < m; i++) {
+      Ox[i] = xyz[i * 3] - SO[0];
+      Oy[i] = xyz[i * 3 + 1] - SO[1];
+      Oz[i] = xyz[i * 3 + 2] - SO[2];
+      Dx[i] = xyz[(i + 1) * 3] - xyz[i * 3];
+      Dy[i] = xyz[(i + 1) * 3 + 1] - xyz[i * 3 + 1];
+      Dz[i] = xyz[(i + 1) * 3 + 2] - xyz[i * 3 + 2];
+    }
+    const markerSize = 30;
+    const minspeed = new Uint8Array(m);
+    for (let i = 0; i < m; i++) {
+      const dd = Dx[i] * Dx[i] + Dy[i] * Dy[i] + Dz[i] * Dz[i];
+      const dtm = (timecodes[i + 1] - timecodes[i]) * (4 / 1e3);
+      minspeed[i] = dd > dtm * dtm ? 1 : 0;
+    }
+    const computePass = (snx, sny, snz, fixedSN) => {
+      const t = new Float64Array(m);
+      const dist = new Float64Array(m);
+      const SNx = snx ?? new Float64Array(m);
+      const SNy = sny ?? new Float64Array(m);
+      const SNz = snz ?? new Float64Array(m);
+      for (let i = 0; i < m; i++) {
+        let nx, ny, nz;
+        if (fixedSN) {
+          [nx, ny, nz] = fixedSN;
+        } else {
+          const sdDotD = SD[0] * Dx[i] + SD[1] * Dy[i] + SD[2] * Dz[i];
+          nx = sdDotSd * Dx[i] - sdDotD * SD[0];
+          ny = sdDotSd * Dy[i] - sdDotD * SD[1];
+          nz = sdDotSd * Dz[i] - sdDotD * SD[2];
+          SNx[i] = nx;
+          SNy[i] = ny;
+          SNz[i] = nz;
+        }
+        const denom = nx * Dx[i] + ny * Dy[i] + nz * Dz[i];
+        const num = -(nx * Ox[i] + ny * Oy[i] + nz * Oz[i]);
+        t[i] = Math.max(num / denom, 0);
+        const px = Ox[i] + t[i] * Dx[i];
+        const py = Oy[i] + t[i] * Dy[i];
+        const pz = Oz[i] + t[i] * Dz[i];
+        dist[i] = px * px + py * py + pz * pz;
+      }
+      const pick2 = new Uint8Array(m);
+      for (let i = 1; i < m; i++) {
+        pick2[i] = t[i] <= 1 && t[i - 1] > 1 && dist[i] < markerSize * markerSize ? 1 : 0;
+      }
+      return { t, pick: pick2, SNx, SNy, SNz };
+    };
+    const p1 = computePass(null, null, null, null);
+    let ax = 0;
+    let ay = 0;
+    let az = 0;
+    for (let i = 1; i < m; i++) {
+      if (p1.pick[i] && minspeed[i]) {
+        ax += p1.SNx[i];
+        ay += p1.SNy[i];
+        az += p1.SNz[i];
+      }
+    }
+    const p2 = computePass(null, null, null, [ax, ay, az]);
+    const lapMarkers = [0];
+    for (let idx = 1; idx < m; idx++) {
+      if (!p2.pick[idx])
+        continue;
+      if (timecodes[idx] <= lapMarkers[lapMarkers.length - 1])
+        continue;
+      let useIdx = idx;
+      if (!minspeed[useIdx]) {
+        let j = useIdx;
+        while (j < m && !minspeed[j])
+          j++;
+        useIdx = j < m ? j : useIdx;
+      }
+      lapMarkers.push(timecodes[useIdx] + p2.t[useIdx] * (timecodes[useIdx + 1] - timecodes[useIdx]));
+    }
+    return lapMarkers.slice(1);
+  }
+  function detectOffsetFromGnfi(gpsTime, gnfi, expectedDtMs) {
+    if (!gnfi || gnfi.length < 2 || gpsTime.length < 2)
+      return [];
+    const OVERFLOW_BUG_MS = 65533;
+    const TOLERANCE = 5e3;
+    const offset = gpsTime[gpsTime.length - 1] - gnfi[gnfi.length - 1];
+    if (!(offset >= OVERFLOW_BUG_MS - TOLERANCE && offset <= OVERFLOW_BUG_MS + TOLERANCE)) {
+      return [];
+    }
+    const gapThreshold = expectedDtMs * 10;
+    let largestGapIdx = -1;
+    let largestGap = 0;
+    for (let i = 0; i < gpsTime.length - 1; i++) {
+      const d = gpsTime[i + 1] - gpsTime[i];
+      if (d > gapThreshold && d > largestGap) {
+        largestGap = d;
+        largestGapIdx = i;
+      }
+    }
+    if (largestGapIdx < 0)
+      return [];
+    const gapTime = gpsTime[largestGapIdx];
+    const correction = largestGap >= OVERFLOW_BUG_MS - TOLERANCE && largestGap <= OVERFLOW_BUG_MS + TOLERANCE ? largestGap - expectedDtMs : OVERFLOW_BUG_MS;
+    return [[gapTime, Math.trunc(correction)]];
+  }
+  function fixGpsTimingGaps(channels, laps, gnfiTimecodes, correctLaps, expectedDtMs = 40) {
+    const OVERFLOW_BUG_MS = 65533;
+    const OVERFLOW_GAP_MIN = 6e4;
+    const OVERFLOW_GAP_MAX = 7e4;
+    let gpsChannel = null;
+    for (const name of GPS_CHANNEL_NAMES) {
+      const ch = channels.get(name);
+      if (ch) {
+        gpsChannel = ch;
+        break;
+      }
+    }
+    if (!gpsChannel)
+      return;
+    const gpsTime = gpsChannel.timecodes;
+    if (gpsTime.length < 2)
+      return;
+    const gapThreshold = expectedDtMs * 10;
+    const gapIndices = [];
+    for (let i = 0; i < gpsTime.length - 1; i++) {
+      if (gpsTime[i + 1] - gpsTime[i] > gapThreshold)
+        gapIndices.push(i);
+    }
+    if (gapIndices.length === 0)
+      return;
+    let corrections = [];
+    corrections = detectOffsetFromGnfi(gpsTime, gnfiTimecodes, expectedDtMs);
+    if (corrections.length === 0) {
+      for (const gi of gapIndices) {
+        const gapSize = gpsTime[gi + 1] - gpsTime[gi];
+        if (gapSize >= OVERFLOW_GAP_MIN && gapSize <= OVERFLOW_GAP_MAX) {
+          corrections.push([gpsTime[gi], gapSize - expectedDtMs]);
+        }
+      }
+    }
+    if (corrections.length === 0) {
+      const gpsNames = new Set(GPS_CHANNEL_NAMES);
+      let maxNonGpsEnd = -Infinity;
+      for (const [name, ch] of channels) {
+        if (!gpsNames.has(name) && ch.timecodes.length) {
+          maxNonGpsEnd = Math.max(maxNonGpsEnd, ch.timecodes[ch.timecodes.length - 1]);
+        }
+      }
+      if (maxNonGpsEnd > -Infinity) {
+        const endOffset = gpsTime[gpsTime.length - 1] - maxNonGpsEnd;
+        if (endOffset >= OVERFLOW_GAP_MIN && endOffset <= OVERFLOW_GAP_MAX) {
+          let largestGapIdx = gapIndices[0];
+          let largestGap = 0;
+          for (const gi of gapIndices) {
+            const d = gpsTime[gi + 1] - gpsTime[gi];
+            if (d > largestGap) {
+              largestGap = d;
+              largestGapIdx = gi;
+            }
+          }
+          corrections.push([gpsTime[largestGapIdx], OVERFLOW_BUG_MS]);
+        }
+      }
+    }
+    if (corrections.length === 0)
+      return;
+    const fixed = new Float64Array(gpsTime.length);
+    fixed.set(gpsTime);
+    for (const [gapTime, correction] of corrections) {
+      for (let i = 0; i < fixed.length; i++) {
+        if (fixed[i] > gapTime)
+          fixed[i] -= correction;
+      }
+    }
+    for (let i = 0; i < fixed.length; i++)
+      fixed[i] = Math.trunc(fixed[i]);
+    for (const name of GPS_CHANNEL_NAMES) {
+      const ch = channels.get(name);
+      if (ch)
+        ch.timecodes = fixed;
+    }
+    if (correctLaps && laps.length) {
+      for (const lap of laps) {
+        for (const [gapTime, correction] of corrections) {
+          if (lap.startTime > gapTime)
+            lap.startTime -= correction;
+          if (lap.endTime > gapTime)
+            lap.endTime -= correction;
+        }
+        lap.startTime = Math.trunc(lap.startTime);
+        lap.endTime = Math.trunc(lap.endTime);
+      }
+    }
+  }
+
+  // node_modules/aim-xrk/dist/laps.js
+  var TOK_LAP = tokdec("LAP");
+  var TOK_TRK = tokdec("TRK");
+  function getLaps(latCh, lonCh, messages, timeOffset, lastTime) {
+    const lapNums = [];
+    const startTimes = [];
+    const endTimes = [];
+    let hasLapMessages = false;
+    const lapMsgs = messages.get(TOK_LAP);
+    if (lapMsgs) {
+      hasLapMessages = true;
+      for (const m of lapMsgs) {
+        const raw = m.content;
+        if (!(raw instanceof Uint8Array) || raw.length < 20)
+          continue;
+        const dv = new DataView(raw.buffer, raw.byteOffset, raw.byteLength);
+        const segment = raw[1];
+        const lap = dv.getUint16(2, true);
+        const duration = dv.getUint32(4, true);
+        const endTime = dv.getUint32(16, true) - timeOffset;
+        if (segment)
+          continue;
+        if (lapNums.length === 0) {
+        } else if (lapNums[lapNums.length - 1] === lap) {
+          continue;
+        } else if (lapNums[lapNums.length - 1] + 1 === lap) {
+        } else if (lapNums[lapNums.length - 1] + 2 === lap) {
+          lapNums.push(lap - 1);
+          startTimes.push(endTimes[endTimes.length - 1]);
+          endTimes.push(endTime - duration);
+        } else {
+          throw new Error(`Lap gap from ${lapNums[lapNums.length - 1]} to ${lap}`);
+        }
+        lapNums.push(lap);
+        startTimes.push(endTime - duration);
+        endTimes.push(endTime);
+      }
+    } else if (latCh && lonCh) {
+      const trkMsgs = messages.get(TOK_TRK);
+      const trk = trkMsgs?.[trkMsgs.length - 1]?.content;
+      if (trk && typeof trk.sf_lat === "number") {
+        const lat = latCh.values;
+        const lon = lonCh.values;
+        const n = Math.min(lat.length, lon.length);
+        const xyz = new Float64Array(n * 3);
+        for (let i = 0; i < n; i++) {
+          const [x, y, z] = lla2ecef(lat[i], lon[i], 0);
+          xyz[i * 3] = x;
+          xyz[i * 3 + 1] = y;
+          xyz[i * 3 + 2] = z;
+        }
+        const markers = findLaps(xyz, latCh.timecodes, trk.sf_lat, trk.sf_long);
+        const sessionEnd = latCh.timecodes.length ? latCh.timecodes[latCh.timecodes.length - 1] : lastTime ? lastTime - timeOffset : 0;
+        if (markers.length) {
+          const bounds = [...markers, sessionEnd];
+          for (let lap = 0; lap + 1 < bounds.length; lap++) {
+            lapNums.push(lap);
+            startTimes.push(bounds[lap]);
+            endTimes.push(bounds[lap + 1]);
+          }
+        }
+      }
+    }
+    if (lapNums.length) {
+      const minLap = Math.min(...lapNums);
+      for (let i = 0; i < lapNums.length; i++)
+        lapNums[i] -= minLap;
+    }
+    const laps = lapNums.map((num, i) => ({
+      num,
+      startTime: Math.trunc(startTimes[i]),
+      endTime: Math.trunc(endTimes[i])
+    }));
+    return { laps, hasLapMessages };
+  }
+
+  // node_modules/aim-xrk/dist/metadata.js
+  function last(messages, tok) {
+    const list = messages.get(tok);
+    return list?.[list.length - 1];
+  }
+  function getMetadata(messages, channels) {
+    const ret = {};
+    const simple = [
+      ["RCR", "Driver"],
+      ["VEH", "Vehicle"],
+      ["TMD", "Log Date"],
+      ["TMT", "Log Time"],
+      ["VTY", "Session"],
+      ["CMP", "Series"],
+      ["NTE", "Long Comment"]
+    ];
+    for (const [tokStr, name] of simple) {
+      const m = last(messages, tokdec(tokStr));
+      if (m !== void 0)
+        ret[name] = m.content;
+    }
+    const trk = last(messages, tokdec("TRK"));
+    if (trk && typeof trk.content === "object" && trk.content !== null && "name" in trk.content) {
+      ret["Venue"] = trk.content.name;
+    }
+    const odo = last(messages, tokdec("ODO"));
+    if (odo && typeof odo.content === "object" && odo.content !== null) {
+      for (const [name, stats] of Object.entries(odo.content)) {
+        ret[`Odo/${name} Distance (km)`] = stats.dist / 1e3;
+        const t = stats.time;
+        const h = Math.floor(t / 3600);
+        const mnt = Math.floor(t / 60) % 60;
+        const s = t % 60;
+        ret[`Odo/${name} Time`] = `${h}:${String(mnt).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+      }
+    }
+    const idn = last(messages, tokdec("idn"));
+    if (idn && typeof idn.content === "object" && idn.content !== null && "logger_id" in idn.content) {
+      const c = idn.content;
+      ret["Logger ID"] = c.logger_id;
+      ret["Logger Model ID"] = c.model_id;
+      ret["Logger Model"] = LOGGER_MODELS.get(c.model_id) ?? null;
+    }
+    const ndv = last(messages, tokdec("NDV"));
+    if (ndv !== void 0)
+      ret["Device Name"] = ndv.content;
+    const gpsr = last(messages, tokdec("GPSR"));
+    if (gpsr && typeof gpsr.content === "object" && gpsr.content !== null && "type" in gpsr.content) {
+      ret["GPS Receiver"] = gpsr.content.type;
+    }
+    const enfMsgs = messages.get(tokdec("ENF"));
+    if (enfMsgs) {
+      const devices = [];
+      for (const enf of enfMsgs) {
+        if (!(enf.content instanceof Map))
+          continue;
+        const sub = enf.content;
+        const device = {};
+        const props = [
+          ["DBUN", "Bus Unit"],
+          ["DBUT", "Bus Type"],
+          ["DVER", "Version"],
+          ["MANL", "Manufacturer"],
+          ["MODL", "Model"]
+        ];
+        for (const [tokStr, key] of props) {
+          const list = sub.get(tokdec(tokStr));
+          if (list && list.length)
+            device[key] = list[list.length - 1].content;
+        }
+        if (Object.keys(device).length)
+          devices.push(device);
+      }
+      const islvMsgs = (messages.get(tokdec("iSLV")) ?? []).filter((m) => typeof m.content === "object" && m.content !== null && "logger_id" in m.content);
+      devices.forEach((device, i) => {
+        if (i < islvMsgs.length) {
+          const c = islvMsgs[i].content;
+          device["Logger ID"] = c.logger_id;
+          device["Model ID"] = c.model_id;
+        }
+      });
+      if (devices.length)
+        ret["Expansion Devices"] = devices;
+    }
+    for (const racm of messages.get(tokdec("RACM")) ?? []) {
+      if (typeof racm.content === "string")
+        ret["Race Mode"] = racm.content;
+    }
+    const vet = last(messages, tokdec("VET"));
+    if (vet !== void 0)
+      ret["Vehicle Electronics Type"] = vet.content;
+    const calMsgs = messages.get(tokdec("CAL"));
+    if (calMsgs) {
+      const calToChannel = /* @__PURE__ */ new Map();
+      if (channels) {
+        for (const ch of channels.values()) {
+          if (ch.unknown.length >= 104) {
+            const dv = new DataView(ch.unknown.buffer, ch.unknown.byteOffset, ch.unknown.byteLength);
+            const f96 = dv.getFloat32(96, true);
+            const f100 = dv.getFloat32(100, true);
+            calToChannel.set(`${f96},${f100}`, ch.longName);
+          }
+        }
+      }
+      const calibrations = [];
+      for (const calMsg of calMsgs) {
+        if (typeof calMsg.content === "object" && calMsg.content !== null && "raw_1" in calMsg.content) {
+          const cal = { ...calMsg.content };
+          const key = `${cal.raw_1},${cal.raw_2}`;
+          const chName = calToChannel.get(key);
+          if (chName !== void 0)
+            cal.channel = chName;
+          calibrations.push(cal);
+        }
+      }
+      if (calibrations.length)
+        ret["Calibrations"] = calibrations;
+    }
+    return ret;
+  }
+
+  // node_modules/aim-xrk/dist/types.js
+  var ByteVec = class {
+    buf = new Uint8Array(1024);
+    len = 0;
+    ensure(extra) {
+      if (this.len + extra <= this.buf.length)
+        return;
+      let cap = this.buf.length * 2;
+      while (cap < this.len + extra)
+        cap *= 2;
+      const next = new Uint8Array(cap);
+      next.set(this.buf.subarray(0, this.len));
+      this.buf = next;
+    }
+    appendRange(src, start, end) {
+      const n = end - start;
+      this.ensure(n);
+      this.buf.set(src.subarray(start, end), this.len);
+      this.len += n;
+    }
+    pushByte(b) {
+      this.ensure(1);
+      this.buf[this.len++] = b;
+    }
+    view() {
+      return this.buf.subarray(0, this.len);
+    }
+  };
+  var IntVec = class {
+    buf = new Int32Array(256);
+    len = 0;
+    push(v) {
+      if (this.len === this.buf.length) {
+        const next = new Int32Array(this.buf.length * 2);
+        next.set(this.buf);
+        this.buf = next;
+      }
+      this.buf[this.len++] = v;
+    }
+    view() {
+      return this.buf.subarray(0, this.len);
+    }
+  };
+  function newAccum() {
+    return {
+      lastTimecode: -1,
+      addHelper: 1,
+      Mms: 0,
+      data: new ByteVec(),
+      timecodes: new IntVec()
+    };
+  }
+
+  // node_modules/aim-xrk/dist/parser.js
+  var OP_G = 18216;
+  var OP_S = 21288;
+  var OP_M = 19752;
+  var OP_c = 25384;
+  var OP_h = 26684;
+  var CP = 41;
+  var LT = 60;
+  var GT = 62;
+  var TOK_GPS = tokdec("GPS");
+  var TOK_GPS1 = tokdec("GPS1");
+  var TOK_GNFI = tokdec("GNFI");
+  var TOK_CNF = tokdec("CNF");
+  var TOK_ENF = tokdec("ENF");
+  var TOK_GRP = tokdec("GRP");
+  var TOK_CDE = tokdec("CDE");
+  var TOK_CHS = tokdec("CHS");
+  var TOK_LAP2 = tokdec("LAP");
+  var TOK_IDN = tokdec("idn");
+  var TOK_SRC = tokdec("SRC");
+  var TOK_GPSR = tokdec("GPSR");
+  var TOK_RACM = tokdec("RACM");
+  var TOK_VET = tokdec("VET");
+  var TOK_ISLV = tokdec("iSLV");
+  var TOK_CAL = tokdec("CAL");
+  var TOK_TRK2 = tokdec("TRK");
+  var TOK_ODO = tokdec("ODO");
+  var STRING_TOKENS = new Set([
+    "RCR",
+    "VEH",
+    "CMP",
+    "VTY",
+    "NDV",
+    "TMD",
+    "TMT",
+    "DBUN",
+    "DBUT",
+    "DVER",
+    "MANL",
+    "MODL",
+    "MANI",
+    "MODI",
+    "HWNF",
+    "PDLT",
+    "NTE",
+    "+LM",
+    "MAN",
+    "MOD"
+  ].map(tokdec));
+  function resize(arr, idx) {
+    while (arr.length <= idx)
+      arr.push(newAccum());
+  }
+  function parseChs(payload) {
+    if (payload.length !== 112)
+      throw new Error("CHS wrong size");
+    const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    const unitByte = payload[12];
+    let units = "";
+    let decPts = 0;
+    const um = UNIT_MAP.get(unitByte & 127);
+    if (um) {
+      units = um[0];
+      decPts = um[1];
+    }
+    if (unitByte & 128 && units === "mV")
+      units = "V";
+    const deviceTagBytes = payload.subarray(76, 80);
+    const hasTag = deviceTagBytes.some((b) => b !== 0);
+    const copy = new Uint8Array(payload);
+    copy.fill(0, 0, 2);
+    copy.fill(0, 24, 32);
+    copy.fill(0, 32, 56);
+    return {
+      index: dv.getUint16(0, true),
+      shortName: nulltermString(payload.subarray(24, 32)),
+      longName: nulltermString(payload.subarray(32, 56)),
+      size: payload[72],
+      units,
+      decPts,
+      interpolate: false,
+      unknown: copy,
+      func: resolveFunction(payload[13], payload[12], dv.getUint16(14, true)),
+      sourceType: payload[16],
+      sourceChannelId: dv.getUint16(6, true),
+      deviceTag: hasTag ? nulltermString(deviceTagBytes) : "",
+      calValue1: dv.getFloat32(96, true),
+      calValue2: dv.getFloat32(100, true),
+      displayRangeMin: dv.getFloat32(104, true),
+      displayRangeMax: dv.getFloat32(108, true),
+      group: null,
+      timecodes: new Float64Array(0),
+      values: new Float64Array(0),
+      hasData: false
+    };
+  }
+  function parseGrp(payload) {
+    if (payload.length < 4 || payload.length % 2 !== 0)
+      throw new Error("bad GRP");
+    const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    const index = dv.getUint16(0, true);
+    const count = dv.getUint16(2, true);
+    const channels = [];
+    for (let i = 4; i < payload.length; i += 2)
+      channels.push(dv.getUint16(i, true));
+    if (count !== channels.length) {
+      throw new Error(`GRP channel count mismatch: ${count} vs ${channels.length}`);
+    }
+    return { index, channels, rows: null, rowStride: 0, timecodes: null };
+  }
+  function parseHeaderContent(tok, payload, state2) {
+    const dv = new DataView(payload.buffer, payload.byteOffset, payload.byteLength);
+    if (tok === TOK_CNF) {
+      for (const cat of state2.gc) {
+        for (const acc of cat)
+          acc.lastTimecode = -1;
+      }
+      const sub = parseRaw(payload).messages;
+      const chsMsgs = sub.get(TOK_CHS);
+      if (!chsMsgs)
+        throw new Error("CNF without CHS");
+      for (const m of chsMsgs) {
+        const ch = m.content;
+        while (state2.channels.length <= ch.index)
+          state2.channels.push(null);
+        const existing = state2.channels[ch.index];
+        if (!existing) {
+          state2.channels[ch.index] = ch;
+          resize(state2.gc[1], ch.index);
+          state2.gc[1][ch.index].addHelper = ch.size + 9;
+          resize(state2.gc[2], ch.index);
+          state2.gc[2][ch.index].addHelper = ch.size + 12;
+          resize(state2.gc[3], ch.index);
+          state2.gc[3][ch.index].addHelper = ch.size;
+          const dvu = new DataView(ch.unknown.buffer, ch.unknown.byteOffset, ch.unknown.byteLength);
+          state2.gc[3][ch.index].Mms = Math.floor(dvu.getUint32(64, true) / 1e3);
+        } else {
+          if (existing.shortName !== ch.shortName) {
+            throw new Error(`Channel short_name mismatch: ${existing.shortName} vs ${ch.shortName}`);
+          }
+          if (existing.longName !== ch.longName) {
+            throw new Error(`Channel long_name mismatch: ${existing.longName} vs ${ch.longName}`);
+          }
+        }
+      }
+      for (const m of sub.get(TOK_GRP) ?? []) {
+        const grp = m.content;
+        while (state2.groups.length <= grp.index)
+          state2.groups.push(null);
+        state2.groups[grp.index] = grp;
+        let off = 6;
+        let total = 0;
+        for (const chIdx of grp.channels) {
+          const ch = state2.channels[chIdx];
+          if (!ch)
+            throw new Error(`GRP references unknown channel ${chIdx}`);
+          ch.group = { group: grp, offset: off };
+          off += ch.size;
+          total += ch.size;
+        }
+        resize(state2.gc[0], grp.index);
+        state2.gc[0][grp.index].addHelper = 9 + total;
+      }
+      return sub;
+    }
+    if (tok === TOK_ENF)
+      return parseRaw(payload).messages;
+    if (tok === TOK_GRP)
+      return parseGrp(payload);
+    if (tok === TOK_CDE) {
+      return Array.from(payload, (b) => b.toString(16).padStart(2, "0"));
+    }
+    if (tok === TOK_CHS)
+      return parseChs(payload);
+    if (tok === TOK_LAP2) {
+      if (payload.length !== 20)
+        throw new Error("LAP wrong size");
+      const duration = dv.getUint32(4, true);
+      const endTime = dv.getUint32(16, true);
+      if (state2.lapTimeOffset === null)
+        state2.lapTimeOffset = endTime - duration;
+      state2.lapLastTime = endTime;
+      return payload.slice();
+    }
+    if (STRING_TOKENS.has(tok))
+      return nulltermString(payload);
+    if (tok === TOK_IDN) {
+      if (payload.length >= 10) {
+        return { model_id: dv.getUint16(0, true), logger_id: dv.getUint32(6, true) };
+      }
+      return payload.slice();
+    }
+    if (tok === TOK_SRC) {
+      if (payload.length >= 62 && payload[0] === 105 && payload[1] === 100 && payload[2] === 110) {
+        const idn = {
+          model_id: dv.getUint16(6, true),
+          logger_id: dv.getUint32(12, true)
+        };
+        appendMsg(state2.messages, TOK_IDN, { token: TOK_IDN, ver: 1, content: idn });
+      }
+      return payload.slice();
+    }
+    if (tok === TOK_GPSR) {
+      if (payload.length >= 36) {
+        return {
+          type: nulltermString(payload.subarray(4, 8)),
+          channel_index: dv.getUint16(22, true)
+        };
+      }
+      return payload.slice();
+    }
+    if (tok === TOK_RACM || tok === TOK_VET) {
+      if (payload.length > 1)
+        return nulltermString(payload);
+      return payload.length === 1 ? payload[0] : null;
+    }
+    if (tok === TOK_ISLV) {
+      if (payload.length >= 16 && payload[0] === 105 && payload[1] === 100 && payload[2] === 110) {
+        return {
+          model_id: dv.getUint16(6, true),
+          logger_id: dv.getUint32(12, true)
+        };
+      }
+      return payload.slice();
+    }
+    if (tok === TOK_CAL) {
+      if (payload.length >= 40) {
+        const calType = dv.getUint32(20, true);
+        const cal = {
+          type: calType,
+          raw_1: dv.getFloat32(24, true),
+          raw_2: dv.getFloat32(28, true)
+        };
+        if (calType === 1) {
+          cal.output_1 = dv.getFloat32(32, true);
+          cal.output_2 = dv.getFloat32(36, true);
+        }
+        return cal;
+      }
+      return payload.slice();
+    }
+    if (tok === TOK_TRK2) {
+      if (payload.length >= 44) {
+        return {
+          name: nulltermString(payload.subarray(0, 32)),
+          sf_lat: dv.getInt32(36, true) / 1e7,
+          sf_long: dv.getInt32(40, true) / 1e7
+        };
+      }
+      return payload.slice();
+    }
+    if (tok === TOK_ODO) {
+      if (payload.length % 64 !== 0)
+        throw new Error("ODO wrong size");
+      const records = {};
+      for (let i = 0; i + 64 <= payload.length; i += 64) {
+        const name = nulltermString(payload.subarray(i, i + 16));
+        if (name.startsWith("Fuel"))
+          continue;
+        records[name] = {
+          time: dv.getUint32(i + 16, true),
+          dist: dv.getUint32(i + 20, true)
+        };
+      }
+      return records;
+    }
+    return payload.slice();
+  }
+  function appendMsg(messages, tok, msg) {
+    const list = messages.get(tok);
+    if (list)
+      list.push(msg);
+    else
+      messages.set(tok, [msg]);
+  }
+  function parseRaw(data) {
+    const state2 = {
+      messages: /* @__PURE__ */ new Map(),
+      channels: [],
+      groups: [],
+      gc: [[], [], [], []],
+      gpsBytes: new ByteVec(),
+      gnfiBytes: new ByteVec(),
+      lapTimeOffset: null,
+      lapLastTime: null
+    };
+    const dv = new DataView(data.buffer, data.byteOffset, data.byteLength);
+    const len = data.length;
+    const v2v3ByCf = /* @__PURE__ */ new Map();
+    const lastV2BaseTc = /* @__PURE__ */ new Map();
+    const lastV2Plus4Tc = /* @__PURE__ */ new Map();
+    let cVarPos = 0;
+    let pos = 0;
+    while (pos < len) {
+      const oldpos = pos;
+      try {
+        if (pos + 10 >= len)
+          throw new RangeError("eof");
+        const typ = dv.getUint16(pos, true);
+        if (typ === OP_G || typ === OP_S) {
+          const cat = typ === OP_S ? 1 : 0;
+          const index = dv.getUint16(pos + 6, true);
+          const accums = state2.gc[cat];
+          if (index >= accums.length)
+            throw new RangeError("unregistered index");
+          const acc = accums[index];
+          pos += acc.addHelper;
+          if (pos - 1 >= len || data[pos - 1] !== CP) {
+            throw new Error("missing close paren");
+          }
+          const tc = dv.getInt32(oldpos + 2, true);
+          if (tc > acc.lastTimecode) {
+            acc.lastTimecode = tc;
+            acc.data.appendRange(data, oldpos + 2, pos - 1);
+          }
+        } else if (typ === OP_M) {
+          const index = dv.getUint16(pos + 6, true);
+          const accums = state2.gc[3];
+          if (index >= accums.length)
+            throw new RangeError("unregistered index");
+          const acc = accums[index];
+          if (acc.Mms === 0)
+            throw new Error("No ms understood for channel");
+          const count = dv.getUint16(pos + 8, true);
+          pos += acc.addHelper * count + 10;
+          if (pos >= len || data[pos] !== CP)
+            throw new Error("missing close paren");
+          const tc = dv.getInt32(oldpos + 2, true);
+          let mSkip = 0;
+          if (tc <= acc.lastTimecode && acc.Mms > 0) {
+            mSkip = Math.floor((acc.lastTimecode - tc) / acc.Mms) + 1;
+          }
+          if (mSkip < count) {
+            acc.lastTimecode = tc + (count - 1) * acc.Mms;
+            for (let i = mSkip; i < count; i++)
+              acc.timecodes.push(tc + i * acc.Mms);
+            acc.data.appendRange(data, oldpos + 10 + mSkip * acc.addHelper, pos);
+          }
+          pos += 1;
+        } else if (typ === OP_c) {
+          const unk1 = data[pos + 2];
+          const cf = dv.getUint16(pos + 3, true);
+          const unk3 = data[pos + 5];
+          const unk4 = data[pos + 6];
+          if (unk3 !== 132)
+            throw new Error("unexpected c.unk3");
+          if (unk1 === 0 && unk4 === 6) {
+            if ((cf & 7) !== 4)
+              throw new Error("unexpected c.channel low bits");
+            const index = cf >> 3;
+            const accums = state2.gc[2];
+            if (index >= accums.length)
+              throw new RangeError("unregistered index");
+            const acc = accums[index];
+            pos += acc.addHelper;
+            if (pos - 1 >= len || data[pos - 1] !== CP) {
+              throw new Error("missing close paren");
+            }
+            const tc = dv.getInt32(oldpos + 7, true);
+            if (tc > acc.lastTimecode) {
+              acc.lastTimecode = tc;
+              acc.data.appendRange(data, oldpos + 7, pos - 1);
+            }
+          } else if (unk1 === 0 && unk4 === 8) {
+            if (pos + 16 > len)
+              throw new RangeError("eof");
+            if (data[pos + 15] !== CP)
+              throw new Error("V2 close");
+            const tc = dv.getInt32(pos + 7, true);
+            const low = cf & 15;
+            let lst = v2v3ByCf.get(cf);
+            if (!lst)
+              v2v3ByCf.set(cf, lst = []);
+            if (low === 0 || low === 8) {
+              lst.push([tc, data[pos + 11], data[pos + 12], 3, cVarPos]);
+              lst.push([tc - 4, data[pos + 13], data[pos + 14], 3, cVarPos]);
+              lastV2BaseTc.set(cf, [tc, cVarPos]);
+            } else {
+              lst.push([tc - 2, data[pos + 11], data[pos + 12], 1, cVarPos]);
+              lst.push([tc - 4, data[pos + 13], data[pos + 14], 1, cVarPos]);
+              lastV2Plus4Tc.set(cf, [tc, cVarPos]);
+            }
+            cVarPos += 1;
+            pos += 16;
+          } else if (unk1 === 1 && unk4 === 2) {
+            if (pos + 10 > len)
+              throw new RangeError("eof");
+            if (data[pos + 9] !== CP)
+              throw new Error("V3 close");
+            const baseCf = cf ^ 4;
+            const baseEntry = lastV2BaseTc.get(baseCf);
+            const plus4Entry = lastV2Plus4Tc.get(cf);
+            let synthTc = -1;
+            if (baseEntry && (!plus4Entry || baseEntry[1] >= plus4Entry[1])) {
+              synthTc = baseEntry[0] - 2;
+            } else if (plus4Entry) {
+              synthTc = plus4Entry[0] + 2;
+            }
+            if (synthTc >= 0) {
+              let lst = v2v3ByCf.get(cf);
+              if (!lst)
+                v2v3ByCf.set(cf, lst = []);
+              lst.push([synthTc, data[pos + 7], data[pos + 8], 2, cVarPos]);
+            }
+            cVarPos += 1;
+            pos += 10;
+          } else {
+            throw new Error("unknown c variant");
+          }
+        } else if (typ === OP_h) {
+          const wireTok = dv.getUint32(pos + 2, true);
+          const hlen = dv.getInt32(pos + 6, true);
+          const ver = data[pos + 10];
+          if (hlen < 0 || hlen >= len)
+            throw new RangeError("bad hlen");
+          if (data[pos + 11] !== GT)
+            throw new Error("expected >");
+          const payloadStart = pos + 12;
+          const footerStart = payloadStart + hlen;
+          if (footerStart + 8 > len)
+            throw new RangeError("eof");
+          if (data[footerStart] !== LT)
+            throw new Error("expected <");
+          let bytesum = 0;
+          for (let i = payloadStart; i < footerStart; i++)
+            bytesum += data[i];
+          bytesum &= 65535;
+          if (dv.getUint32(footerStart + 1, true) !== wireTok) {
+            throw new Error("token mismatch");
+          }
+          if (dv.getUint16(footerStart + 5, true) !== bytesum) {
+            throw new Error("checksum mismatch");
+          }
+          if (data[footerStart + 7] !== GT)
+            throw new Error("expected >");
+          pos = footerStart + 8;
+          let tok = wireTok;
+          if (tok >>> 24 === 32)
+            tok = tok - 536870912 >>> 0;
+          if (tok === TOK_GPS || tok === TOK_GPS1) {
+            state2.gpsBytes.appendRange(data, payloadStart, footerStart);
+          } else if (tok === TOK_GNFI) {
+            state2.gnfiBytes.appendRange(data, payloadStart, footerStart);
+          } else {
+            const payload = data.subarray(payloadStart, footerStart);
+            const content = parseHeaderContent(tok, payload, state2);
+            appendMsg(state2.messages, tok, { token: tok, ver, content });
+          }
+        } else {
+          throw new Error("unknown byte sequence");
+        }
+      } catch {
+        pos = oldpos + 1;
+      }
+    }
+    resolveV2V3(state2, v2v3ByCf);
+    return state2;
+  }
+  function resolveV2V3(state2, v2v3ByCf) {
+    if (v2v3ByCf.size === 0)
+      return;
+    const cfs = [...v2v3ByCf.keys()].sort((a, b) => a - b);
+    const cfSet = new Set(cfs);
+    const pairs = [];
+    const orphans = [];
+    const processed = /* @__PURE__ */ new Set();
+    for (const cf of cfs) {
+      if (processed.has(cf))
+        continue;
+      const low = cf & 15;
+      if ((low === 0 || low === 8) && cfSet.has(cf | 4)) {
+        pairs.push([cf, cf | 4]);
+        processed.add(cf);
+        processed.add(cf | 4);
+      } else if ((low === 4 || low === 12) && cfSet.has(cf & ~4)) {
+        continue;
+      } else {
+        orphans.push(cf);
+        processed.add(cf);
+      }
+    }
+    const pairedCandidates = [];
+    const orphanCandidates = [];
+    state2.channels.forEach((ch, chIdx) => {
+      if (!ch || ch.unknown.length < 68)
+        return;
+      if (ch.unknown[20] !== 20 || ch.sourceType !== 1)
+        return;
+      const dvu = new DataView(ch.unknown.buffer, ch.unknown.byteOffset, ch.unknown.byteLength);
+      const hwId = dvu.getUint16(4, true);
+      if (hwId === 0)
+        return;
+      const hwRef = dvu.getUint32(8, true);
+      const mms = Math.floor(dvu.getUint32(64, true) / 1e3);
+      if (mms <= 5)
+        pairedCandidates.push([hwRef, ch.sourceChannelId, chIdx]);
+      else if (mms <= 15)
+        orphanCandidates.push([hwRef, ch.sourceChannelId, chIdx]);
+    });
+    const byKey = (a, b) => a[0] - b[0] || a[1] - b[1] || a[2] - b[2];
+    pairedCandidates.sort(byKey);
+    orphanCandidates.sort(byKey);
+    const expansionMap = /* @__PURE__ */ new Map();
+    for (let i = 0; i < Math.min(pairs.length, pairedCandidates.length); i++) {
+      expansionMap.set(pairs[i][0], pairedCandidates[i][2]);
+      expansionMap.set(pairs[i][1], pairedCandidates[i][2]);
+    }
+    for (let i = 0; i < Math.min(orphans.length, orphanCandidates.length); i++) {
+      expansionMap.set(orphans[i], orphanCandidates[i][2]);
+    }
+    const perChannel = /* @__PURE__ */ new Map();
+    for (const [cf, entries] of v2v3ByCf) {
+      const chIdx = expansionMap.get(cf);
+      if (chIdx === void 0)
+        continue;
+      let bucket = perChannel.get(chIdx);
+      if (!bucket)
+        perChannel.set(chIdx, bucket = /* @__PURE__ */ new Map());
+      for (const [tc, b0, b1, prio] of entries) {
+        const existing = bucket.get(tc);
+        if (!existing || prio > existing[2])
+          bucket.set(tc, [b0, b1, prio]);
+      }
+    }
+    for (const [chIdx, samples] of perChannel) {
+      resize(state2.gc[2], chIdx);
+      const acc = state2.gc[2][chIdx];
+      if (acc.addHelper === 1) {
+        const ch = state2.channels[chIdx];
+        acc.addHelper = (ch ? ch.size : 2) + 12;
+      }
+      const tcs = [...samples.keys()].sort((a, b) => a - b);
+      for (const tc of tcs) {
+        if (tc <= acc.lastTimecode)
+          continue;
+        acc.lastTimecode = tc;
+        acc.data.pushByte(tc & 255);
+        acc.data.pushByte(tc >> 8 & 255);
+        acc.data.pushByte(tc >> 16 & 255);
+        acc.data.pushByte(tc >> 24 & 255);
+        const [b0, b1] = samples.get(tc);
+        acc.data.pushByte(b0);
+        acc.data.pushByte(b1);
+      }
+    }
+  }
+  function computeTimeBounds(state2) {
+    const mins = [];
+    const maxs = [];
+    if (state2.lapTimeOffset !== null)
+      mins.push(state2.lapTimeOffset);
+    if (state2.lapLastTime !== null)
+      maxs.push(state2.lapLastTime);
+    for (let cat = 0; cat < 3; cat++) {
+      for (const acc of state2.gc[cat]) {
+        const size = acc.data.len;
+        if (!size)
+          continue;
+        const view = acc.data.view();
+        const dv = new DataView(view.buffer, view.byteOffset, view.byteLength);
+        mins.push(dv.getInt32(0, true));
+        const stride = acc.addHelper - (cat < 2 ? 3 : 8);
+        const nRows = Math.floor(size / stride);
+        maxs.push(dv.getInt32((nRows - 1) * stride, true));
+      }
+    }
+    for (const acc of state2.gc[3]) {
+      if (acc.timecodes.len) {
+        mins.push(acc.timecodes.buf[0]);
+        maxs.push(acc.timecodes.buf[acc.timecodes.len - 1]);
+      }
+    }
+    if (state2.gpsBytes.len >= 56) {
+      const view = state2.gpsBytes.view();
+      const dv = new DataView(view.buffer, view.byteOffset, view.byteLength);
+      mins.push(dv.getInt32(0, true));
+      maxs.push(dv.getInt32(state2.gpsBytes.len - 56, true));
+    }
+    const timeOffset = mins.length ? Math.min(...mins) : 0;
+    const lastTime = maxs.length ? Math.max(...maxs) : 0;
+    return [timeOffset, lastTime];
+  }
+
+  // node_modules/aim-xrk/dist/index.js
+  var EXCLUDED_CHANNELS = /* @__PURE__ */ new Set(["StrtRec", "Master Clk"]);
+  function toPublicChannel(ch) {
+    return {
+      name: ch.longName,
+      shortName: ch.shortName,
+      units: ch.size === 1 ? "" : ch.units,
+      decPts: ch.decPts,
+      interpolate: ch.interpolate,
+      func: ch.func,
+      sourceType: ch.sourceType,
+      sourceChannelId: ch.sourceChannelId,
+      deviceTag: ch.deviceTag,
+      calValue1: ch.calValue1,
+      calValue2: ch.calValue2,
+      displayRangeMin: ch.displayRangeMin,
+      displayRangeMax: ch.displayRangeMax,
+      timecodes: ch.timecodes,
+      values: ch.values
+    };
+  }
+  function parseXrk(input) {
+    const bytes = input instanceof Uint8Array ? new Uint8Array(input.buffer, input.byteOffset, input.byteLength) : new Uint8Array(input);
+    const data = decompressIfZlib(bytes);
+    const state2 = parseRaw(data);
+    const hasChannels = state2.channels.some((c) => c !== null);
+    let channelMap = /* @__PURE__ */ new Map();
+    let laps = [];
+    let hasLapMessages = false;
+    let gnfi = null;
+    if (hasChannels) {
+      const [timeOffset, lastTime] = computeTimeBounds(state2);
+      for (const g of state2.groups) {
+        if (g)
+          processGroup(g, state2, timeOffset);
+      }
+      for (const ch of state2.channels) {
+        if (ch && !ch.group)
+          processChannel(ch, state2, timeOffset);
+      }
+      const gpsChannels = decodeGps(state2.gpsBytes.view(), timeOffset);
+      gnfi = decodeGnfi(state2.gnfiBytes.view(), timeOffset);
+      let latCh = null;
+      let lonCh = null;
+      for (const ch of gpsChannels) {
+        if (ch.longName === "GPS Latitude")
+          latCh = ch;
+        if (ch.longName === "GPS Longitude")
+          lonCh = ch;
+      }
+      const lapResult = getLaps(latCh, lonCh, state2.messages, timeOffset, lastTime);
+      laps = lapResult.laps;
+      hasLapMessages = lapResult.hasLapMessages;
+      const all = [...state2.channels, ...gpsChannels];
+      for (const ch of all) {
+        if (ch && ch.hasData && !EXCLUDED_CHANNELS.has(ch.longName)) {
+          channelMap.set(ch.longName, ch);
+        }
+      }
+    }
+    const metadata = getMetadata(state2.messages, channelMap);
+    fixGpsTimingGaps(channelMap, laps, gnfi, !hasLapMessages);
+    const channels = {};
+    for (const [name, ch] of channelMap)
+      channels[name] = toPublicChannel(ch);
+    return { channels, laps, metadata };
+  }
+
+  // src/standalone.ts
+  var COLORS = ["#e85d04", "#f0c14d", "#3ddc97", "#5eb1ff", "#c084fc", "#fb7185", "#94a3b8", "#f97316"];
+  var lapColor = (i) => COLORS[i % COLORS.length];
+  function formatLap(seconds) {
+    if (!Number.isFinite(seconds)) return "\u2014";
+    const sign = seconds < 0 ? "\u2212" : "";
+    const abs = Math.abs(seconds);
+    const m = Math.floor(abs / 60);
+    const s = (abs - m * 60).toFixed(3).padStart(6, "0");
+    return m > 0 ? `${sign}${m}:${s}` : `${sign}${s}`;
+  }
+  function isSpeedName(name) {
+    return /speed/i.test(name) && !/rate|accur|fix/i.test(name);
+  }
+  function channelMax(ch) {
+    let max = 0;
+    const step = Math.max(1, Math.floor(ch.values.length / 500));
+    for (let i = 0; i < ch.values.length; i += step) {
+      const v = ch.values[i];
+      if (v > max) max = v;
+    }
+    return max;
+  }
+  function displayScale(ch) {
+    if (!isSpeedName(ch.name)) return { unit: ch.units || "", scale: 1 };
+    const max = channelMax(ch);
+    if (max > 0 && max < 130) return { unit: "km/h", scale: 3.6 };
+    return { unit: ch.units || "km/h", scale: 1 };
+  }
+  function sliceChannel(ch, startMs, endMs) {
+    const tc = ch.timecodes;
+    const values = ch.values;
+    let lo = 0;
+    let hi = tc.length;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (tc[mid] < startMs) lo = mid + 1;
+      else hi = mid;
+    }
+    const out = [];
+    for (let i = lo; i < tc.length && tc[i] <= endMs; i++) {
+      const v = values[i];
+      if (v == null || Number.isNaN(v)) continue;
+      out.push({ t: (tc[i] - startMs) / 1e3, v });
+    }
+    return out;
+  }
+  function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371e3;
+    const toR = Math.PI / 180;
+    const dLat = (lat2 - lat1) * toR;
+    const dLon = (lon2 - lon1) * toR;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  function profileFromPoints(num, startMs, endMs, duration, times, dist, source) {
+    if (times.length < 2 || dist[dist.length - 1] < 50) return null;
+    const total = dist[dist.length - 1];
+    if (times[0] > 0.05) {
+      times.unshift(0);
+      dist.unshift(0);
+    }
+    if (duration - times[times.length - 1] > 0.02) {
+      times.push(duration);
+      dist.push(total);
+    }
+    return { num, startMs, endMs, duration, times, dist, total, source };
+  }
+  function profileFromGps(num, startMs, endMs, duration, lat, lon) {
+    const n = Math.min(lat.length, lon.length);
+    const times = [];
+    const dist = [];
+    let acc = 0;
+    let prevLat = 0;
+    let prevLon = 0;
+    let has = false;
+    for (let i = 0; i < n; i++) {
+      const la = lat[i].v;
+      const lo = lon[i].v;
+      if (Math.abs(la) > 90 || Math.abs(lo) > 180) continue;
+      if (Math.abs(la) < 0.01 && Math.abs(lo) < 0.01) continue;
+      if (has) {
+        const step = haversine(prevLat, prevLon, la, lo);
+        if (step > 80) continue;
+        acc += step;
+      }
+      times.push(lat[i].t);
+      dist.push(acc);
+      prevLat = la;
+      prevLon = lo;
+      has = true;
+    }
+    return profileFromPoints(num, startMs, endMs, duration, times, dist, "gps");
+  }
+  function profileFromSpeed(num, startMs, endMs, duration, speed, rawIsMs) {
+    if (speed.length < 2) return null;
+    const times = [speed[0].t];
+    const dist = [0];
+    let acc = 0;
+    for (let i = 1; i < speed.length; i++) {
+      const dt = speed[i].t - speed[i - 1].t;
+      if (dt <= 0 || dt > 2) continue;
+      const ms = rawIsMs ? speed[i].v : speed[i].v / 3.6;
+      if (ms < 0 || ms > 120) continue;
+      acc += ms * dt;
+      times.push(speed[i].t);
+      dist.push(acc);
+    }
+    return profileFromPoints(num, startMs, endMs, duration, times, dist, "speed");
+  }
+  function prepare(log, fileName) {
+    const channels = Object.values(log.channels).filter((ch) => ch.timecodes.length > 1).map((ch) => {
+      const d = displayScale(ch);
+      return { key: ch.name, label: ch.func?.trim() || ch.name.replaceAll("_", " "), unit: d.unit, scale: d.scale, channel: ch };
+    }).sort((a, b) => a.label.localeCompare(b.label));
+    const lat = Object.values(log.channels).find(
+      (ch) => ch.name === "GPS Latitude" || /lat/i.test(ch.name) && !/acc|lateral/i.test(ch.name)
+    );
+    const lon = Object.values(log.channels).find(
+      (ch) => ch.name === "GPS Longitude" || /lon|long/i.test(ch.name) && !/acc/i.test(ch.name)
+    );
+    const speed = Object.values(log.channels).find((ch) => isSpeedName(ch.name));
+    const speedIsMs = speed ? displayScale(speed).scale === 3.6 : true;
+    const laps = [];
+    let gps = 0;
+    let spd = 0;
+    for (const lap of log.laps) {
+      const duration = (lap.endTime - lap.startTime) / 1e3;
+      if (duration < 5) continue;
+      let profile = null;
+      if (lat && lon) {
+        profile = profileFromGps(lap.num, lap.startTime, lap.endTime, duration, sliceChannel(lat, lap.startTime, lap.endTime), sliceChannel(lon, lap.startTime, lap.endTime));
+      }
+      if (!profile && speed) {
+        profile = profileFromSpeed(lap.num, lap.startTime, lap.endTime, duration, sliceChannel(speed, lap.startTime, lap.endTime), speedIsMs);
+      }
+      if (!profile) continue;
+      if (profile.source === "gps") gps++;
+      else spd++;
+      laps.push(profile);
+    }
+    const meta = log.metadata ?? {};
+    return {
+      fileName,
+      vehicle: String(meta.Vehicle ?? "\u2014"),
+      track: String(meta.Venue ?? meta.Track ?? "Session"),
+      channels,
+      laps,
+      distanceNote: gps > 0 ? "Splits follow GPS distance, so each sector is the same piece of track on every lap." : spd > 0 ? "No usable latitude/longitude. Splits follow distance integrated from speed." : "No GPS position or speed, so sectors cannot be placed."
+    };
+  }
+  function timeAtFraction(p, fraction) {
+    if (fraction <= 0) return 0;
+    if (fraction >= 1) return p.duration;
+    const target = fraction * p.total;
+    let lo = 0;
+    let hi = p.dist.length - 1;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (p.dist[mid] < target) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === 0) return p.times[0] ?? 0;
+    const span = p.dist[lo] - p.dist[lo - 1];
+    const u = span > 1e-6 ? (target - p.dist[lo - 1]) / span : 0;
+    return p.times[lo - 1] + u * (p.times[lo] - p.times[lo - 1]);
+  }
+  function fractionAtTime(p, timeSec) {
+    if (timeSec <= 0 || p.total <= 0) return 0;
+    if (timeSec >= p.duration) return 1;
+    let lo = 0;
+    let hi = p.times.length - 1;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (p.times[mid] < timeSec) lo = mid + 1;
+      else hi = mid;
+    }
+    if (lo === 0) return 0;
+    const span = p.times[lo] - p.times[lo - 1];
+    const u = span > 1e-6 ? (timeSec - p.times[lo - 1]) / span : 0;
+    const d = p.dist[lo - 1] + u * (p.dist[lo] - p.dist[lo - 1]);
+    return Math.min(1, Math.max(0, d / p.total));
+  }
+  function downsample(samples, maxPoints) {
+    if (samples.length <= maxPoints) return samples;
+    const step = samples.length / maxPoints;
+    const out = [];
+    for (let i = 0; i < maxPoints; i++) out.push(samples[Math.floor(i * step)]);
+    const last2 = samples[samples.length - 1];
+    if (out[out.length - 1] !== last2) out.push(last2);
+    return out;
+  }
+  var state = { log: null, keys: [], laps: [], anchor: null, splits: [], place: false, cursor: null, equal: 4, drag: null };
+  var app = document.getElementById("app");
+  function fastest(laps) {
+    return laps.reduce((b, l) => l.duration < b.duration ? l : b);
+  }
+  function chosen() {
+    return state.log ? state.log.laps.filter((l) => state.laps.includes(l.num)) : [];
+  }
+  function anchorLap() {
+    const laps = chosen();
+    if (!laps.length) return null;
+    return laps.find((l) => l.num === state.anchor) ?? fastest(laps);
+  }
+  function sectors() {
+    const laps = chosen();
+    if (!state.splits.length || !laps.length) return [];
+    const bounds = [0, ...[...state.splits].sort((a, b) => a - b), 1];
+    const rows = [];
+    for (let s = 0; s < bounds.length - 1; s++) {
+      const from = bounds[s];
+      const to = bounds[s + 1];
+      const times = laps.map((lap) => timeAtFraction(lap, to) - timeAtFraction(lap, from));
+      let best = Infinity;
+      let bestLap = laps[0].num;
+      times.forEach((t, i) => {
+        if (t < best) {
+          best = t;
+          bestLap = laps[i].num;
+        }
+      });
+      rows.push({ index: s + 1, from, to, times, best, bestLap });
+    }
+    return rows;
+  }
+  function addSplit(fraction) {
+    if (fraction <= 0.015 || fraction >= 0.985) return;
+    if (state.splits.some((s) => Math.abs(s - fraction) < 0.012)) return;
+    state.splits = [...state.splits, fraction].sort((a, b) => a - b);
+    saveSplits();
+  }
+  function saveSplits() {
+    if (!state.log) return;
+    localStorage.setItem("lap-splits:" + state.log.track, JSON.stringify(state.splits));
+  }
+  function render() {
+    const log = state.log;
+    if (!log) {
+      app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open .xrk</button></header>
+      <main class="empty"><h2>Sectors, then the ideal lap</h2>
+      <p>Open a session, drop splits along the lap, and the ideal time is the sum of the fastest pass through each sector.</p>
+      <button id="open2">Choose a file</button></main>`;
+      document.getElementById("open").onclick = pick;
+      document.getElementById("open2").onclick = pick;
+      return;
+    }
+    const laps = chosen();
+    const anchor = anchorLap();
+    const rows = sectors();
+    const ideal = rows.reduce((s, r) => s + r.best, 0);
+    const bestActual = laps.length ? Math.min(...laps.map((l) => l.duration)) : NaN;
+    const delta = ideal - bestActual;
+    const deltaText = !rows.length ? "Add at least one split" : !Number.isFinite(delta) ? "" : delta < -5e-4 ? `${formatLap(delta)} vs best lap` : delta > 5e-4 ? `+${formatLap(delta)} vs best lap` : "matches the best lap";
+    app.innerHTML = `
+    <header class="bar">
+      <h1>Sim Motorsport Data</h1>
+      <button id="open">Open .xrk</button>
+      <span class="meta">${log.fileName} \xB7 ${log.vehicle} \xB7 ${log.track}</span>
+    </header>
+    <div class="layout">
+      <aside>
+        <h2>Channels</h2>
+        <div class="list" id="channels"></div>
+        <div class="row"><h2>Laps</h2><button id="flying" class="link">Flying only</button></div>
+        <div id="laps"></div>
+      </aside>
+      <main>
+        <section class="card">
+          <div class="idealrow">
+            <div>
+              <div class="kicker">Ideal lap</div>
+              <div class="ideal">${rows.length && laps.length ? formatLap(ideal) : "\u2014"}</div>
+              <div class="sub">${rows.length ? `Best full lap ${formatLap(bestActual)} \xB7 ${deltaText}` : deltaText}</div>
+            </div>
+            <div class="tools">
+              <button id="place" class="${state.place ? "on" : ""}">${state.place ? "Click a graph to drop a split" : "Place on graph"}</button>
+              <label>Equal <input id="equal" type="number" min="2" max="12" value="${state.equal}"></label>
+              <button id="divide">Divide lap</button>
+              <button id="clear">Clear</button>
+            </div>
+          </div>
+          <p class="sub">${log.distanceNote}</p>
+          <div id="bar" class="splitbar"></div>
+          <div id="chips" class="chips"></div>
+          <p class="hint">Click the bar to add a split. Drag a marker to move it. Lines follow reference lap ${anchor ? "L" + anchor.num : ""}.</p>
+        </section>
+        <p id="readout" class="hint"></p>
+        <div id="plots"></div>
+        <div id="table"></div>
+      </main>
+    </div>`;
+    document.getElementById("open").onclick = pick;
+    document.getElementById("flying").onclick = () => {
+      const q = fastest(log.laps).duration;
+      const flying = log.laps.filter((l) => l.duration < q * 1.12);
+      state.laps = flying.map((l) => l.num);
+      state.anchor = fastest(flying).num;
+      render();
+    };
+    document.getElementById("place").onclick = () => {
+      state.place = !state.place;
+      render();
+    };
+    document.getElementById("equal").onchange = (e) => {
+      state.equal = Number(e.target.value) || 4;
+    };
+    document.getElementById("divide").onclick = () => {
+      const n = Math.max(2, Math.min(12, state.equal));
+      state.splits = [];
+      for (let i = 1; i < n; i++) state.splits.push(i / n);
+      saveSplits();
+      render();
+    };
+    document.getElementById("clear").onclick = () => {
+      state.splits = [];
+      saveSplits();
+      render();
+    };
+    const chBox = document.getElementById("channels");
+    for (const ch of log.channels) {
+      const label = document.createElement("label");
+      label.innerHTML = `<input type="checkbox" ${state.keys.includes(ch.key) ? "checked" : ""}> ${ch.label}`;
+      label.querySelector("input").onchange = () => {
+        state.keys = state.keys.includes(ch.key) ? state.keys.filter((k) => k !== ch.key) : [...state.keys, ch.key];
+        render();
+      };
+      chBox.appendChild(label);
+    }
+    const lapBox = document.getElementById("laps");
+    log.laps.forEach((lap, index) => {
+      const row = document.createElement("div");
+      row.className = "laprow";
+      row.innerHTML = `<label><input type="checkbox" ${state.laps.includes(lap.num) ? "checked" : ""}><i style="background:${lapColor(index)}"></i><span>L${lap.num} ${formatLap(lap.duration)}</span></label><button class="${anchor?.num === lap.num ? "on" : ""}">Ref</button>`;
+      row.querySelector("input").onchange = () => {
+        state.laps = state.laps.includes(lap.num) ? state.laps.filter((n) => n !== lap.num) : [...state.laps, lap.num];
+        render();
+      };
+      row.querySelector("button").onclick = () => {
+        state.anchor = lap.num;
+        render();
+      };
+      lapBox.appendChild(row);
+    });
+    const bar = document.getElementById("bar");
+    const sorted = [...state.splits].sort((a, b) => a - b);
+    bar.innerHTML = `<div class="track"></div>` + sorted.map((f, i) => `<div class="mark" style="left:${f * 100}%"><b></b><span>${i + 1}</span></div>`).join("");
+    const fracOf = (e) => {
+      const r = bar.getBoundingClientRect();
+      return Math.min(0.99, Math.max(0.01, (e.clientX - r.left) / Math.max(r.width, 1)));
+    };
+    bar.onpointerdown = (e) => {
+      const f = fracOf(e);
+      const hit = state.splits.findIndex((s) => Math.abs(s - f) < 0.018);
+      if (hit >= 0) {
+        state.drag = hit;
+        bar.setPointerCapture(e.pointerId);
+        return;
+      }
+      addSplit(f);
+      render();
+    };
+    bar.onpointermove = (e) => {
+      if (state.drag == null) return;
+      const f = fracOf(e);
+      state.splits[state.drag] = f;
+      const marks = bar.querySelectorAll(".mark");
+      const order = [...state.splits.keys()].sort((a, b) => state.splits[a] - state.splits[b]);
+      order.forEach((idx, visual) => {
+        const el = marks[visual];
+        if (!el) return;
+        el.style.left = `${state.splits[idx] * 100}%`;
+      });
+    };
+    bar.onpointerup = () => {
+      if (state.drag == null) return;
+      state.drag = null;
+      state.splits = [...state.splits].sort((a, b) => a - b);
+      saveSplits();
+      render();
+    };
+    const chips = document.getElementById("chips");
+    sorted.forEach((f, order) => {
+      const btn = document.createElement("button");
+      btn.textContent = `S${order + 1} ${(f * 100).toFixed(0)}% remove`;
+      btn.onclick = () => {
+        state.splits = state.splits.filter((s) => s !== f);
+        saveSplits();
+        render();
+      };
+      chips.appendChild(btn);
+    });
+    const xMax = laps.length ? Math.max(...laps.map((l) => l.duration)) : 60;
+    const splitTimes = anchor ? [...state.splits].sort((a, b) => a - b).map((f) => timeAtFraction(anchor, f)) : [];
+    const plots = document.getElementById("plots");
+    const shown = state.keys.map((k) => log.channels.find((c) => c.key === k)).filter((c) => !!c).slice(0, 6);
+    for (const ch of shown) {
+      const wrap = document.createElement("div");
+      wrap.className = "plot";
+      const canvas = document.createElement("canvas");
+      wrap.appendChild(canvas);
+      plots.appendChild(wrap);
+      const series = laps.map((lap) => ({
+        color: lapColor(log.laps.findIndex((x) => x.num === lap.num)),
+        samples: downsample(sliceChannel(ch.channel, lap.startMs, lap.endMs), 700),
+        scale: ch.scale
+      }));
+      draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, state.cursor);
+      const timeOf = (e) => {
+        const r = canvas.getBoundingClientRect();
+        const x = e.clientX - r.left - 52;
+        const w = r.width - 64;
+        if (w <= 0) return null;
+        const t = x / w * xMax;
+        return t < 0 || t > xMax ? null : t;
+      };
+      canvas.onpointermove = (e) => {
+        const t = timeOf(e);
+        state.cursor = t;
+        const readout = document.getElementById("readout");
+        if (!readout || t == null || !anchor) return;
+        const bits = shown.map((c) => {
+          const samples = sliceChannel(c.channel, anchor.startMs, anchor.endMs);
+          let best = Infinity;
+          let v = NaN;
+          for (const s of samples) {
+            const d = Math.abs(s.t - t);
+            if (d < best) {
+              best = d;
+              v = s.v * c.scale;
+            }
+          }
+          return `${c.label} ${Number.isFinite(v) ? v.toFixed(1) : "\u2014"}`;
+        });
+        readout.textContent = `t ${t.toFixed(2)}s   ` + bits.join("   ");
+        draw(canvas, wrap, ch.label, ch.unit, series, xMax, splitTimes, t);
+      };
+      canvas.onpointerdown = (e) => {
+        if (!state.place || !anchor) return;
+        const t = timeOf(e);
+        if (t == null) return;
+        addSplit(fractionAtTime(anchor, t));
+        render();
+      };
+    }
+    if (rows.length && laps.length) {
+      const head = `<tr><th>Sector</th><th>Track</th>${laps.map((l) => `<th>L${l.num}</th>`).join("")}<th>Best</th></tr>`;
+      const body = rows.map((row) => {
+        const cells = row.times.map((t, i) => `<td class="${laps[i].num === row.bestLap ? "best" : ""}">${formatLap(t)}</td>`).join("");
+        return `<tr><td>S${row.index}</td><td>${(row.from * 100).toFixed(0)}\u2013${(row.to * 100).toFixed(0)}%</td>${cells}<td class="best">L${row.bestLap} ${formatLap(row.best)}</td></tr>`;
+      }).join("");
+      const foot = `<tr class="foot"><td colspan="2">Ideal</td>${laps.map((l) => `<td>${formatLap(l.duration)}</td>`).join("")}<td class="best">${formatLap(ideal)}</td></tr>`;
+      document.getElementById("table").innerHTML = `<table>${head}${body}${foot}</table>`;
+    }
+  }
+  function draw(canvas, wrap, title, unit, series, xMax, splitTimes, cursor) {
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const width = wrap.clientWidth || 800;
+    const height = 160;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    canvas.style.width = "100%";
+    canvas.style.height = height + "px";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const pad = { l: 52, r: 12, t: 22, b: 22 };
+    const plotW = Math.max(1, width - pad.l - pad.r);
+    const plotH = Math.max(1, height - pad.t - pad.b);
+    ctx.fillStyle = "#181b1f";
+    ctx.fillRect(0, 0, width, height);
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    for (const line of series) {
+      for (const p of line.samples) {
+        const y = p.v * line.scale;
+        if (!Number.isFinite(y)) continue;
+        if (y < yMin) yMin = y;
+        if (y > yMax) yMax = y;
+      }
+    }
+    if (!Number.isFinite(yMin)) {
+      yMin = 0;
+      yMax = 1;
+    }
+    if (yMax - yMin < 1e-6) {
+      yMin -= 1;
+      yMax += 1;
+    }
+    const padY = (yMax - yMin) * 0.08;
+    yMin -= padY;
+    yMax += padY;
+    const xOf = (t) => pad.l + t / Math.max(xMax, 1e-3) * plotW;
+    const yOf = (v) => pad.t + (1 - (v - yMin) / (yMax - yMin)) * plotH;
+    ctx.strokeStyle = "#2a3036";
+    ctx.font = "11px ui-monospace, monospace";
+    ctx.fillStyle = "#8e98a3";
+    for (let i = 0; i <= 4; i++) {
+      const y = pad.t + plotH * i / 4;
+      ctx.beginPath();
+      ctx.moveTo(pad.l, y);
+      ctx.lineTo(width - pad.r, y);
+      ctx.stroke();
+      ctx.fillText(String(Math.round(yMax - (yMax - yMin) * i / 4)), 4, y + 3);
+    }
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(pad.l, pad.t, plotW, plotH);
+    ctx.clip();
+    for (const line of series) {
+      ctx.beginPath();
+      ctx.strokeStyle = line.color;
+      ctx.lineWidth = 1.6;
+      let started = false;
+      for (const p of line.samples) {
+        const y = p.v * line.scale;
+        if (!Number.isFinite(y)) continue;
+        const x = xOf(p.t);
+        const yy = yOf(y);
+        if (!started) {
+          ctx.moveTo(x, yy);
+          started = true;
+        } else ctx.lineTo(x, yy);
+      }
+      ctx.stroke();
+    }
+    ctx.restore();
+    ctx.setLineDash([3, 3]);
+    ctx.strokeStyle = "#f0c14d";
+    for (const t of splitTimes) {
+      const x = xOf(t);
+      ctx.beginPath();
+      ctx.moveTo(x, pad.t);
+      ctx.lineTo(x, pad.t + plotH);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    if (cursor != null) {
+      const x = xOf(cursor);
+      ctx.strokeStyle = "#e7ebef";
+      ctx.beginPath();
+      ctx.moveTo(x, pad.t);
+      ctx.lineTo(x, pad.t + plotH);
+      ctx.stroke();
+    }
+    ctx.fillStyle = "#e7ebef";
+    ctx.font = "600 12px sans-serif";
+    ctx.fillText(unit ? `${title}  \xB7  ${unit}` : title, pad.l, 14);
+  }
+  var picker = document.createElement("input");
+  picker.type = "file";
+  picker.accept = ".xrk,.xrz";
+  picker.style.display = "none";
+  document.body.appendChild(picker);
+  picker.onchange = async () => {
+    const file = picker.files?.[0];
+    picker.value = "";
+    if (!file) return;
+    try {
+      const buf = await file.arrayBuffer();
+      const parsed = parseXrk(new Uint8Array(buf));
+      const prepared = prepare(parsed, file.name);
+      if (!prepared.laps.length) {
+        alert("No laps with a usable distance trace were found.");
+        return;
+      }
+      state.log = prepared;
+      const match = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /gear/i];
+      const defaults = prepared.channels.filter((c) => match.some((r) => r.test(c.label) || r.test(c.key))).slice(0, 5);
+      state.keys = (defaults.length ? defaults : prepared.channels.slice(0, 3)).map((c) => c.key);
+      const quick = fastest(prepared.laps).duration;
+      const flying = prepared.laps.filter((l) => l.duration < quick * 1.12);
+      state.laps = (flying.length ? flying : prepared.laps).map((l) => l.num);
+      state.anchor = fastest(flying.length ? flying : prepared.laps).num;
+      const saved = localStorage.getItem("lap-splits:" + prepared.track);
+      state.splits = [];
+      if (saved) {
+        try {
+          const arr = JSON.parse(saved);
+          if (Array.isArray(arr)) state.splits = arr.filter((n) => typeof n === "number" && n > 0.01 && n < 0.99);
+        } catch {
+        }
+      }
+      render();
+    } catch (err) {
+      alert(err instanceof Error ? err.message : "Could not read that file.");
+    }
+  };
+  function pick() {
+    picker.click();
+  }
+  render();
+})();
+</script>
+</body>
+</html>
