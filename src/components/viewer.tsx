@@ -1,22 +1,43 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { parseXrk } from "aim-xrk";
 import { Flag, MousePointer2, Plus, RotateCcw, Upload } from "lucide-react";
-import { TracePlot } from "@/components/trace-plot";
+import { DeltaPlot, TracePlot, type PlotMarker } from "@/components/trace-plot";
+import { downloadCoachingNote, safeStem, type CoachingNote, type NoteChart } from "@/lib/coaching-note";
 import {
+  coachingChannelKeys,
+  deltaVsDistance,
   downsample,
   equalSplits,
   formatLap,
+  formatSigned,
   fractionAtTime,
   idealSeconds,
+  isCoachingChannel,
   lapColor,
-  prepareLog,
-  sectorTable,
+  markersForLap,
+  median,
+  moveSpanEdge,
+  parseSavedTemplates,
+  parseSplitDocument,
+  removeSpanEdge,
+  sectorLabel,
+  sectorTableFromSpans,
+  serializeSavedTemplates,
+  serializeSplitDocument,
   sliceChannel,
+  spansFromSplits,
+  spansFromTemplate,
   timeAtFraction,
+  topSectorLosses,
+  ZIC_TEMPLATE,
+  prepareLog,
+  type LapProfile,
+  type NamedSector,
   type PreparedLog,
+  type SavedTemplate,
 } from "@/lib/telemetry";
 
-const DEFAULT_MATCH = [/gps speed/i, /rpm/i, /front fork/i, /rear shock/i, /twist/i, /gear/i];
+const TEMPLATE_STORE = "lap-templates";
 
 function storageKey(track: string) {
   return `lap-splits:${track}`;
@@ -30,30 +51,32 @@ export function Viewer() {
   const [selectedKeys, setSelectedKeys] = useState<string[]>([]);
   const [selectedLaps, setSelectedLaps] = useState<number[]>([]);
   const [anchor, setAnchor] = useState<number | null>(null);
-  const [splits, setSplits] = useState<number[]>([]);
+  const [spans, setSpans] = useState<NamedSector[]>([]);
+  const [templateId, setTemplateId] = useState("manual");
+  const [lapLengthM, setLapLengthM] = useState(0);
+  const [templatePick, setTemplatePick] = useState("zic");
+  const [templateName, setTemplateName] = useState("");
+  const [saved, setSaved] = useState<SavedTemplate[]>([]);
   const [placeMode, setPlaceMode] = useState(false);
   const [cursor, setCursor] = useState<number | null>(null);
   const [equalCount, setEqualCount] = useState(4);
   const [dragging, setDragging] = useState<number | null>(null);
 
   useEffect(() => {
-    if (!log) return;
-    const raw = localStorage.getItem(storageKey(log.track));
-    if (!raw) return;
-    try {
-      const parsed = JSON.parse(raw) as unknown;
-      if (Array.isArray(parsed) && parsed.every((n) => typeof n === "number")) {
-        setSplits(parsed.filter((n) => n > 0.01 && n < 0.99));
-      }
-    } catch {
-      /* ignore broken storage */
-    }
-  }, [log]);
+    setSaved(parseSavedTemplates(localStorage.getItem(TEMPLATE_STORE)));
+  }, [log, templateId]);
 
   useEffect(() => {
     if (!log) return;
-    localStorage.setItem(storageKey(log.track), JSON.stringify(splits));
-  }, [log, splits]);
+    try {
+      localStorage.setItem(
+        storageKey(log.track),
+        serializeSplitDocument({ v: 2, templateId, lapLengthM, spans }),
+      );
+    } catch {
+      /* private window */
+    }
+  }, [log, spans, templateId, lapLengthM]);
 
   const chosenLaps = useMemo(() => {
     if (!log) return [];
@@ -65,15 +88,40 @@ export function Viewer() {
     return chosenLaps.find((lap) => lap.num === anchor) ?? fastest(chosenLaps);
   }, [chosenLaps, anchor]);
 
-  const rows = useMemo(() => (splits.length ? sectorTable(chosenLaps, splits) : []), [chosenLaps, splits]);
-  const ideal = rows.length ? idealSeconds(rows) : NaN;
+  const pair = useMemo(() => reviewPair(chosenLaps, log?.laps ?? [], anchorLap), [chosenLaps, log, anchorLap]);
+  const rows = useMemo(() => (spans.length ? sectorTableFromSpans(chosenLaps, spans) : []), [chosenLaps, spans]);
+  const ideal = rows.length && rows.every((row) => Number.isFinite(row.best)) ? idealSeconds(rows) : NaN;
   const bestActual = chosenLaps.length ? Math.min(...chosenLaps.map((lap) => lap.duration)) : NaN;
   const xMax = chosenLaps.length ? Math.max(...chosenLaps.map((lap) => lap.duration)) : 60;
+  const refIndex = anchorLap ? chosenLaps.findIndex((lap) => lap.num === anchorLap.num) : -1;
 
   const splitTimes = useMemo(() => {
     if (!anchorLap) return [];
-    return [...splits].sort((a, b) => a - b).map((f) => timeAtFraction(anchorLap, f));
-  }, [anchorLap, splits]);
+    return spans.slice(0, -1).map((span) => timeAtFraction(anchorLap, span.to));
+  }, [anchorLap, spans]);
+
+  const markerByLap = useMemo(() => {
+    const map = new Map<number, ReturnType<typeof markersForLap>>();
+    if (!log || !spans.some((span) => span.kind === "corner")) return map;
+    const keys = coachingChannelKeys(log.channels);
+    for (const lap of chosenLaps) {
+      const brake = channelOf(log, keys.brake);
+      const speed = channelOf(log, keys.speed);
+      const lean = channelOf(log, keys.lean);
+      map.set(
+        lap.num,
+        markersForLap(lap, spans, {
+          brake: brake ? sliceChannel(brake.channel, lap.startMs, lap.endMs) : null,
+          brakeUnit: brake?.unit ?? "",
+          speed: speed ? sliceChannel(speed.channel, lap.startMs, lap.endMs) : null,
+          speedScale: speed?.scale ?? 1,
+          lean: lean ? sliceChannel(lean.channel, lap.startMs, lap.endMs) : null,
+          leanScale: lean?.scale ?? 1,
+        }),
+      );
+    }
+    return map;
+  }, [log, chosenLaps, spans]);
 
   const plots = useMemo(() => {
     if (!log) return [];
@@ -86,6 +134,18 @@ export function Viewer() {
         title: ch.label,
         unit: ch.unit,
         scale: ch.scale,
+        markers: isCoachingChannel(ch) || (/speed/i.test(`${ch.label} ${ch.key}`) && !/rate|accur|fix/i.test(`${ch.label} ${ch.key}`))
+          ? chosenLaps.flatMap((lap, lane) =>
+              (markerByLap.get(lap.num) ?? []).map(
+                (hit): PlotMarker => ({
+                  t: hit.t,
+                  color: lapColor(log.laps.findIndex((item) => item.num === lap.num)),
+                  kind: hit.kind,
+                  lane,
+                }),
+              ),
+            )
+          : [],
         series: chosenLaps.map((lap) => ({
           name: `Lap ${lap.num}`,
           color: lapColor(log.laps.findIndex((item) => item.num === lap.num)),
@@ -93,7 +153,16 @@ export function Viewer() {
           samples: downsample(sliceChannel(ch.channel, lap.startMs, lap.endMs), 700),
         })),
       }));
-  }, [log, selectedKeys, chosenLaps]);
+  }, [log, selectedKeys, chosenLaps, markerByLap]);
+
+  const deltaSeries = useMemo(() => {
+    if (!pair) return [];
+    return pair.laps.map((lap) => ({
+      name: `L${lap.num}`,
+      color: lapColor(log?.laps.findIndex((item) => item.num === lap.num) ?? 0),
+      points: deltaVsDistance(pair.ref, lap, 240),
+    }));
+  }, [pair, log]);
 
   const cursorReadout = useMemo(() => {
     if (cursor == null || !log || !anchorLap) return [];
@@ -111,12 +180,35 @@ export function Viewer() {
         }
       }
       const value = nearest ? nearest.v * channel.scale : NaN;
-      return {
-        label: plot.title,
-        value: Number.isFinite(value) ? value.toFixed(1) : "—",
-      };
+      return { label: plot.title, value: Number.isFinite(value) ? value.toFixed(1) : "—" };
     });
   }, [cursor, log, anchorLap, plots]);
+
+  function remember(nextSpans: NamedSector[], nextTemplate: string, length = lapLengthM) {
+    setSpans(nextSpans);
+    setTemplateId(nextTemplate);
+    setLapLengthM(length);
+  }
+
+  function applyTemplate(id: string) {
+    if (!log) return;
+    const length = median((chosenLaps.length ? chosenLaps : log.laps).map((lap) => lap.total));
+    if (id === "manual") {
+      remember(spansFromSplits(spans.slice(0, -1).map((span) => span.to)), "manual", length || lapLengthM);
+      return;
+    }
+    if (id === "zic") {
+      if (length < 200) return;
+      const placed = spansFromTemplate(ZIC_TEMPLATE, length);
+      remember(placed.spans, "zic", placed.lapLengthM);
+      return;
+    }
+    if (id.startsWith("saved:")) {
+      const found = saved.find((item) => item.name === id.slice(6));
+      if (!found) return;
+      remember(found.spans.map((span) => ({ ...span })), id, found.lapLengthM || length);
+    }
+  }
 
   async function openFile(file: File) {
     setError(null);
@@ -133,17 +225,34 @@ export function Viewer() {
         setStatus(null);
         return;
       }
-      setLog(prepared);
-      const defaults = prepared.channels
-        .filter((ch) => DEFAULT_MATCH.some((re) => re.test(ch.label) || re.test(ch.key)))
-        .slice(0, 5)
-        .map((ch) => ch.key);
+      const coach = coachingChannelKeys(prepared.channels);
+      const defaults = [coach.brake, coach.throttle, coach.lean].filter((key): key is string => !!key);
       setSelectedKeys(defaults.length ? defaults : prepared.channels.slice(0, 3).map((ch) => ch.key));
       const quickest = fastest(prepared.laps).duration;
-      const flying = prepared.laps.filter((lap) => lap.duration < quickest * 1.12).map((lap) => lap.num);
-      setSelectedLaps(flying.length ? flying : prepared.laps.map((lap) => lap.num));
-      setAnchor(fastest(prepared.laps.filter((lap) => (flying.length ? flying.includes(lap.num) : true))).num);
-      setSplits([]);
+      const flying = prepared.laps.filter((lap) => lap.duration < quickest * 1.12);
+      const active = flying.length ? flying : prepared.laps;
+      setSelectedLaps(active.map((lap) => lap.num));
+      setAnchor(fastest(active).num);
+      const stored = parseSplitDocument(localStorage.getItem(storageKey(prepared.track)));
+      const length = median(active.map((lap) => lap.total));
+      if (stored) {
+        setSpans(stored.spans);
+        setTemplateId(stored.templateId);
+        setTemplatePick(stored.templateId);
+        setLapLengthM(stored.lapLengthM || length);
+      } else if (/zhuhai|\bzic\b/i.test(`${prepared.track} ${prepared.fileName}`)) {
+        const placed = spansFromTemplate(ZIC_TEMPLATE, length);
+        setSpans(placed.spans);
+        setTemplateId("zic");
+        setTemplatePick("zic");
+        setLapLengthM(placed.lapLengthM);
+      } else {
+        setSpans([]);
+        setTemplateId("manual");
+        setTemplatePick("manual");
+        setLapLengthM(length);
+      }
+      setLog(prepared);
       setStatus(null);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Could not read that file.");
@@ -152,16 +261,11 @@ export function Viewer() {
   }
 
   function addSplit(fraction: number) {
+    if (templateId !== "manual") return;
     if (fraction <= 0.015 || fraction >= 0.985) return;
-    setSplits((current) => {
-      if (current.some((item) => Math.abs(item - fraction) < 0.012)) return current;
-      return [...current, fraction].sort((a, b) => a - b);
-    });
-  }
-
-  function placeFromTime(timeSec: number) {
-    if (!anchorLap) return;
-    addSplit(fractionAtTime(anchorLap, timeSec));
+    const edges = spans.slice(0, -1).map((span) => span.to);
+    if (edges.some((edge) => Math.abs(edge - fraction) < 0.012)) return;
+    setSpans(spansFromSplits([...edges, fraction]));
   }
 
   function fractionFromBar(event: PointerEvent<HTMLDivElement>) {
@@ -171,7 +275,16 @@ export function Viewer() {
 
   function onBarDown(event: PointerEvent<HTMLDivElement>) {
     const fraction = fractionFromBar(event);
-    const hit = splits.findIndex((item) => Math.abs(item - fraction) < 0.018);
+    let hit = -1;
+    let best = 0.014;
+    spans.forEach((span, index) => {
+      if (index >= spans.length - 1) return;
+      const distance = Math.abs(span.to - fraction);
+      if (distance < best) {
+        best = distance;
+        hit = index;
+      }
+    });
     if (hit >= 0) {
       setDragging(hit);
       event.currentTarget.setPointerCapture(event.pointerId);
@@ -180,15 +293,98 @@ export function Viewer() {
     addSplit(fraction);
   }
 
-  function onBarMove(event: PointerEvent<HTMLDivElement>) {
-    if (dragging == null) return;
-    const fraction = fractionFromBar(event);
-    setSplits((current) => {
-      if (dragging >= current.length) return current;
-      const next = current.slice();
-      next[dragging] = fraction;
-      return next;
-    });
+  const coach = log ? coachingChannelKeys(log.channels) : {};
+  const missingCoach = [coach.brake ? "" : "brake", coach.throttle ? "" : "throttle", coach.lean ? "" : "lean"].filter(Boolean);
+  const ruler = lapLengthM || median((log?.laps ?? []).map((lap) => lap.total));
+
+  async function exportNote(kind: "png" | "pdf") {
+    if (!log) return;
+    const laps = pair ? [pair.ref, ...pair.laps] : chosenLaps.slice(0, 4);
+    if (!laps.length) return;
+    const ref = laps[0]!;
+    const compare = laps[1];
+    const allRows = sectorTableFromSpans(laps, spans);
+    const tableRows = allRows.some((row) => row.kind === "corner") ? allRows.filter((row) => row.kind === "corner") : allRows;
+    const word = (gap: number) => (gap > 0.0005 ? "behind" : gap < -0.0005 ? "ahead" : "level");
+    const tone = (gap: number): "gain" | "loss" | "plain" => (gap > 0.0005 ? "loss" : gap < -0.0005 ? "gain" : "plain");
+    const charts: NoteChart[] = [];
+    if (compare) {
+      charts.push({
+        title: `Time delta vs L${ref.num}`,
+        unit: "s",
+        xLabel: `${Math.round(ref.total)} m`,
+        xMax: ref.total,
+        zeroLine: true,
+        fillToZero: true,
+        bands: spans.filter((span) => span.kind === "corner").map((span) => ({ from: span.from * ref.total, to: span.to * ref.total, label: span.label })),
+        series: laps.slice(1).map((lap) => ({
+          name: `L${lap.num}`,
+          color: lapColor(log.laps.findIndex((item) => item.num === lap.num)),
+          points: deltaVsDistance(ref, lap, 300).map((point) => ({ x: point.metres, y: point.delta })),
+        })),
+      });
+    }
+    const traced = [coach.brake, coach.throttle, coach.lean];
+    if (traced.filter(Boolean).length < 2 && coach.speed) traced.push(coach.speed);
+    for (const key of traced) {
+      if (!key) continue;
+      const channel = log.channels.find((item) => item.key === key);
+      if (!channel) continue;
+      charts.push({
+        title: channel.label,
+        unit: channel.unit,
+        xLabel: `${Math.max(...laps.map((lap) => lap.duration)).toFixed(0)} s`,
+        xMax: Math.max(...laps.map((lap) => lap.duration), 1),
+        series: laps.map((lap) => ({
+          name: `L${lap.num}`,
+          color: lapColor(log.laps.findIndex((item) => item.num === lap.num)),
+          points: downsample(sliceChannel(channel.channel, lap.startMs, lap.endMs), 420).map((sample) => ({
+            x: sample.t,
+            y: sample.v * channel.scale,
+          })),
+        })),
+        markers: laps.flatMap((lap, lane) =>
+          (markerByLap.get(lap.num) ?? []).map((hit) => ({
+            x: hit.t,
+            color: lapColor(log.laps.findIndex((item) => item.num === lap.num)),
+            kind: hit.kind,
+            lane,
+          })),
+        ),
+      });
+    }
+    const losses = compare ? topSectorLosses(allRows, 0, 1, 3) : [];
+    const note: CoachingNote = {
+      track: log.track,
+      rider: log.rider,
+      vehicle: log.vehicle,
+      fileName: log.fileName,
+      when: log.when,
+      template: templateId === "zic" ? "ZIC C1–C11" : templateId.startsWith("saved:") ? templateId.slice(6) : "Manual splits",
+      ideal: rows.length ? formatLap(ideal) : "",
+      laps: laps.map((lap, index) => ({
+        name: `L${lap.num}`,
+        time: formatLap(lap.duration),
+        color: lapColor(log.laps.findIndex((item) => item.num === lap.num)),
+        role: index === 0 ? "Reference" : `${formatSigned(lap.duration - ref.duration)} s ${word(lap.duration - ref.duration)} on the full lap`,
+      })),
+      sectorHeaders: laps.map((lap, index) => (index === 0 ? `L${lap.num} ref` : `L${lap.num}`)),
+      sectors: tableRows.map((row) => ({
+        label: sectorLabel(row),
+        distance: distanceText(row, templateId, ruler),
+        cells: row.times.map((time, index) => {
+          if (index === 0) return { text: formatLap(time), delta: "", tone: "ref" as const };
+          const gap = time - row.times[0]!;
+          return { text: formatLap(time), delta: `${formatSigned(gap)} ${word(gap)}`, tone: tone(gap) };
+        }),
+      })),
+      lossesTitle: compare ? `Top time lost by L${compare.num} vs L${ref.num}` : "Top time lost",
+      losses: losses.map((item) => ({ label: sectorLabel(item.row), text: `${formatSigned(item.delta)} s behind` })),
+      emptyLosses: compare ? `L${compare.num} is ahead in every sector versus L${ref.num}.` : "Select a second lap to list sector losses.",
+      convention: `Positive time is behind the reference (lost time). Negative time is ahead of the reference (gained time).${missingCoach.length ? ` This session has no ${missingCoach.join(", ")} channel.` : ""}`,
+      charts,
+    };
+    await downloadCoachingNote(note, kind, safeStem(`${log.track}-${log.fileName}-coaching-note`));
   }
 
   return (
@@ -218,20 +414,21 @@ export function Viewer() {
           }}
         />
         <p className="min-w-0 flex-1 truncate font-mono text-sm text-muted">
-          {status ?? (log ? `${log.fileName}  ·  ${log.vehicle}  ·  ${log.track}` : "AIM Solo session")}
+          {status ??
+            (log
+              ? `${log.fileName}  ·  ${log.rider !== "—" ? `${log.rider}  ·  ` : ""}${log.vehicle}  ·  ${log.track}`
+              : "AIM Solo session")}
         </p>
       </header>
 
-      {error ? (
-        <p className="border-b border-border bg-raised px-4 py-3 text-sm text-primary">{error}</p>
-      ) : null}
+      {error ? <p className="border-b border-border bg-raised px-4 py-3 text-sm text-primary">{error}</p> : null}
 
       {!log ? (
         <main className="mx-auto flex max-w-xl flex-1 flex-col justify-center gap-4 px-6 py-16">
-          <h2 className="text-3xl font-semibold tracking-tight">Sectors, then the ideal lap</h2>
+          <h2 className="text-3xl font-semibold tracking-tight">A coach desk for the lap</h2>
           <p className="text-base leading-relaxed text-muted">
-            Open a session, drop splits along the lap, and the ideal time is the sum of the fastest pass
-            through each sector.
+            Open a session, apply the ZIC C1–C11 corners or drop your own splits, and compare where a lap
+            gains and loses time.
           </p>
           <button
             type="button"
@@ -256,9 +453,7 @@ export function Viewer() {
                         checked={selectedKeys.includes(ch.key)}
                         onChange={() =>
                           setSelectedKeys((current) =>
-                            current.includes(ch.key)
-                              ? current.filter((key) => key !== ch.key)
-                              : [...current, ch.key],
+                            current.includes(ch.key) ? current.filter((key) => key !== ch.key) : [...current, ch.key],
                           )
                         }
                       />
@@ -293,16 +488,11 @@ export function Viewer() {
                         checked={selectedLaps.includes(lap.num)}
                         onChange={() =>
                           setSelectedLaps((current) =>
-                            current.includes(lap.num)
-                              ? current.filter((num) => num !== lap.num)
-                              : [...current, lap.num],
+                            current.includes(lap.num) ? current.filter((num) => num !== lap.num) : [...current, lap.num],
                           )
                         }
                       />
-                      <span
-                        className="inline-block size-2.5 rounded-full"
-                        style={{ background: lapColor(index) }}
-                      />
+                      <span className="inline-block size-2.5 rounded-full" style={{ background: lapColor(index) }} />
                       <span className="font-mono">
                         L{lap.num} {formatLap(lap.duration)}
                       </span>
@@ -328,15 +518,66 @@ export function Viewer() {
                 <div>
                   <p className="text-xs font-semibold tracking-wide text-muted uppercase">Ideal lap</p>
                   <p className="font-mono text-3xl font-semibold text-best">
-                    {splits.length && chosenLaps.length ? formatLap(ideal) : "—"}
+                    {spans.length && chosenLaps.length ? formatLap(ideal) : "—"}
                   </p>
                   <p className="text-sm text-muted">
-                    {splits.length && Number.isFinite(bestActual)
+                    {spans.length && Number.isFinite(bestActual)
                       ? `Best full lap ${formatLap(bestActual)} · ${formatDelta(ideal - bestActual)}`
-                      : "Add at least one split"}
+                      : "Apply ZIC or add a split"}
                   </p>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
+                  <label className="flex h-11 items-center gap-2 rounded-sm bg-raised px-3 text-sm">
+                    Track
+                    <select
+                      value={templatePick}
+                      onChange={(event) => setTemplatePick(event.target.value)}
+                      className="bg-transparent text-fg outline-none"
+                    >
+                      <option value="manual">Manual splits</option>
+                      <option value="zic">ZIC C1–C11</option>
+                      {saved.map((item) => (
+                        <option key={item.name} value={`saved:${item.name}`}>
+                          {item.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <button
+                    type="button"
+                    className="inline-flex h-11 items-center rounded-sm bg-primary px-3 text-sm font-semibold text-primary-fg"
+                    onClick={() => applyTemplate(templatePick)}
+                  >
+                    Apply
+                  </button>
+                  <input
+                    value={templateName}
+                    onChange={(event) => setTemplateName(event.target.value)}
+                    placeholder="Save template"
+                    maxLength={40}
+                    className="h-11 w-36 rounded-sm bg-raised px-3 text-sm outline-none"
+                  />
+                  <button
+                    type="button"
+                    className="inline-flex h-11 items-center rounded-sm bg-raised px-3 text-sm font-semibold"
+                    onClick={() => {
+                      const name = templateName.trim().slice(0, 40);
+                      if (!name || !spans.length) return;
+                      const next = [...saved.filter((item) => item.name !== name), { name, spans, lapLengthM: ruler }];
+                      localStorage.setItem(TEMPLATE_STORE, serializeSavedTemplates(next));
+                      setSaved(next);
+                      setTemplateId(`saved:${name}`);
+                      setTemplatePick(`saved:${name}`);
+                    }}
+                  >
+                    Save
+                  </button>
+                  <button type="button" className="inline-flex h-11 items-center rounded-sm bg-raised px-3 text-sm font-semibold" onClick={() => void exportNote("png")}>
+                    Export PNG
+                  </button>
+                  <button type="button" className="inline-flex h-11 items-center rounded-sm bg-raised px-3 text-sm font-semibold" onClick={() => void exportNote("pdf")}>
+                    Export PDF
+                  </button>
                   <button
                     type="button"
                     className={`inline-flex h-11 items-center gap-2 rounded-sm px-3 text-sm font-semibold ${
@@ -361,7 +602,10 @@ export function Viewer() {
                   <button
                     type="button"
                     className="inline-flex h-11 items-center gap-2 rounded-sm bg-raised px-3 text-sm font-semibold"
-                    onClick={() => setSplits(equalSplits(equalCount))}
+                    onClick={() => {
+                      setTemplateId("manual");
+                      setSpans(spansFromSplits(equalSplits(equalCount)));
+                    }}
                   >
                     <Plus className="size-4" aria-hidden="true" />
                     Divide lap
@@ -369,56 +613,108 @@ export function Viewer() {
                   <button
                     type="button"
                     className="inline-flex h-11 items-center gap-2 rounded-sm bg-raised px-3 text-sm font-semibold"
-                    onClick={() => setSplits([])}
+                    onClick={() => {
+                      setTemplateId("manual");
+                      setSpans([]);
+                    }}
                   >
                     <RotateCcw className="size-4" aria-hidden="true" />
                     Clear
                   </button>
                 </div>
               </div>
-              <p className="mb-2 text-sm text-muted">{log.distanceNote}</p>
+              <p className="mb-2 text-sm text-muted">
+                {log.distanceNote}{" "}
+                {templateId === "manual"
+                  ? "Manual splits are a percentage of the lap."
+                  : `Named corners are placed on a ${Math.round(ruler).toLocaleString("en-US")} m lap.`}
+              </p>
               <div
                 className="relative h-12 cursor-crosshair rounded-sm bg-bg"
                 onPointerDown={onBarDown}
-                onPointerMove={onBarMove}
-                onPointerUp={() => {
-                  setDragging(null);
-                  setSplits((current) => [...current].sort((a, b) => a - b));
+                onPointerMove={(event) => {
+                  if (dragging == null) return;
+                  setSpans(moveSpanEdge(spans, dragging, fractionFromBar(event)));
                 }}
+                onPointerUp={() => setDragging(null)}
               >
                 <div className="pointer-events-none absolute inset-x-0 top-1/2 h-1 -translate-y-1/2 bg-border" />
-                {splits.map((fraction, index) => (
+                {spans
+                  .filter((span) => span.kind === "corner")
+                  .map((span) => (
+                    <div
+                      key={span.id}
+                      className="pointer-events-none absolute top-1 bottom-1 rounded-sm bg-primary/15"
+                      style={{ left: `${span.from * 100}%`, width: `${(span.to - span.from) * 100}%` }}
+                    >
+                      <span className="absolute bottom-0 left-1 font-mono text-[10px] text-primary">{span.label}</span>
+                    </div>
+                  ))}
+                {spans.slice(0, -1).map((span, index) => (
                   <div
-                    key={`${index}-${fraction.toFixed(4)}`}
+                    key={`${span.id}-edge`}
                     className="pointer-events-none absolute top-1 flex h-10 w-8 -translate-x-1/2 flex-col items-center"
-                    style={{ left: `${fraction * 100}%` }}
+                    style={{ left: `${span.to * 100}%` }}
                   >
                     <span className="h-5 w-0.5 bg-primary" />
-                    <span className="font-mono text-xs text-primary">{index + 1}</span>
+                    <span className="font-mono text-xs text-primary">{templateId === "manual" ? index + 1 : ""}</span>
                   </div>
                 ))}
               </div>
               <div className="mt-2 flex flex-wrap gap-2">
-                {[...splits]
-                  .map((fraction, index) => ({ fraction, index }))
-                  .sort((a, b) => a.fraction - b.fraction)
-                  .map((item, order) => (
-                    <button
-                      key={`${item.index}-${item.fraction}`}
-                      type="button"
-                      className="h-9 rounded-sm bg-raised px-2 font-mono text-xs"
-                      onClick={() => setSplits((current) => current.filter((_, i) => i !== item.index))}
-                    >
-                      S{order + 1} {(item.fraction * 100).toFixed(0)}% remove
-                    </button>
-                  ))}
+                {templateId === "manual"
+                  ? spans.slice(0, -1).map((span, edge) => (
+                      <button
+                        key={`${span.id}-${edge}`}
+                        type="button"
+                        className="h-9 rounded-sm bg-raised px-2 font-mono text-xs"
+                        onClick={() => setSpans(removeSpanEdge(spans, edge))}
+                      >
+                        {span.label} {(span.to * 100).toFixed(0)}% remove
+                      </button>
+                    ))
+                  : spans
+                      .filter((span) => span.kind === "corner")
+                      .map((span) => (
+                        <span key={span.id} className="inline-flex h-9 items-center rounded-sm bg-raised px-2 font-mono text-xs text-primary">
+                          {sectorLabel(span)} {distanceText(span, templateId, ruler)}
+                        </span>
+                      ))}
               </div>
               <p className="mt-2 text-xs text-muted">
-                Click the bar to add a split. Drag a marker to move it. Lines on the graphs follow the
-                reference lap
-                {anchorLap ? ` L${anchorLap.num}` : ""}.
+                {templateId === "manual"
+                  ? "Click the bar to add a split. Drag a marker to move it."
+                  : "Drag a marker to edit this corner map. Apply Manual splits to go back to percentage sectors."}{" "}
+                Lines on the graphs follow the reference lap
+                {anchorLap ? ` L${anchorLap.num}` : ""}. ▲ brake on, ◆ apex.
               </p>
             </section>
+
+            <section className="rounded-sm border border-border bg-surface p-3">
+              <p className="text-xs font-semibold tracking-wide text-muted uppercase">Time delta vs distance</p>
+              <p className="mt-1 mb-2 text-sm text-muted">
+                {pair
+                  ? pair.implicit
+                    ? `Reference is L${pair.ref.num}, the best other lap. Positive is behind the reference (lost time). Negative is ahead (gained time).`
+                    : `Reference is L${pair.ref.num}. Positive is behind the reference (lost time). Negative is ahead (gained time).`
+                  : "Check two laps, or one lap, to plot time gained and lost."}
+              </p>
+              {pair ? (
+                <DeltaPlot
+                  series={deltaSeries}
+                  metresMax={pair.ref.total}
+                  bands={spans.filter((span) => span.kind === "corner").map((span) => ({ from: span.from * pair.ref.total, to: span.to * pair.ref.total }))}
+                />
+              ) : null}
+            </section>
+
+            {missingCoach.length ? (
+              <p className="text-sm text-muted">
+                Coaching overlays look for brake, throttle, and lean. This file has no {missingCoach.join(" or ")} channel.
+              </p>
+            ) : (
+              <p className="text-sm text-muted">Brake, throttle, and lean are the default overlays. ▲ brake on, ◆ apex.</p>
+            )}
 
             {cursor != null && cursorReadout.length > 0 ? (
               <p className="font-mono text-xs text-muted">
@@ -436,10 +732,14 @@ export function Viewer() {
                   series={plot.series}
                   xMax={xMax}
                   splitTimes={splitTimes}
+                  markers={plot.markers}
                   cursor={cursor}
-                  placeMode={placeMode}
+                  placeMode={placeMode && templateId === "manual"}
                   onCursor={setCursor}
-                  onPlace={placeFromTime}
+                  onPlace={(time) => {
+                    if (!anchorLap) return;
+                    addSplit(fractionAtTime(anchorLap, time));
+                  }}
                 />
               ))}
             </div>
@@ -450,10 +750,11 @@ export function Viewer() {
                   <thead className="bg-raised text-left text-xs tracking-wide text-muted uppercase">
                     <tr>
                       <th className="px-3 py-2 font-semibold">Sector</th>
-                      <th className="px-3 py-2 font-semibold">Track</th>
+                      <th className="px-3 py-2 font-semibold">Distance</th>
                       {chosenLaps.map((lap) => (
                         <th key={lap.num} className="px-3 py-2 text-right font-semibold">
                           L{lap.num}
+                          {lap.num === anchorLap?.num ? " ref" : ""}
                         </th>
                       ))}
                       <th className="px-3 py-2 text-right font-semibold">Best</th>
@@ -461,19 +762,20 @@ export function Viewer() {
                   </thead>
                   <tbody>
                     {rows.map((row) => (
-                      <tr key={row.index} className="border-t border-border">
-                        <td className="px-3 py-2 font-semibold">S{row.index}</td>
-                        <td className="px-3 py-2 font-mono text-muted">
-                          {(row.from * 100).toFixed(0)}–{(row.to * 100).toFixed(0)}%
-                        </td>
+                      <tr key={row.id} className="border-t border-border">
+                        <td className="px-3 py-2 font-semibold">{sectorLabel(row)}</td>
+                        <td className="px-3 py-2 font-mono text-muted">{distanceText(row, templateId, ruler)}</td>
                         {row.times.map((time, index) => {
-                          const won = chosenLaps[index]?.num === row.bestLap;
+                          const won = index === row.bestIndex;
+                          const gap = refIndex >= 0 && index !== refIndex ? time - row.times[refIndex]! : null;
                           return (
-                            <td
-                              key={chosenLaps[index]!.num}
-                              className={`px-3 py-2 text-right font-mono ${won ? "text-best" : ""}`}
-                            >
+                            <td key={chosenLaps[index]!.num} className={`px-3 py-2 text-right font-mono ${won ? "text-best" : ""}`}>
                               {formatLap(time)}
+                              {gap != null ? (
+                                <span className={`block text-xs ${gap > 0.0005 ? "text-rose-400" : gap < -0.0005 ? "text-best" : "text-muted"}`}>
+                                  {formatSigned(gap)} {gap > 0.0005 ? "behind" : gap < -0.0005 ? "ahead" : "level"}
+                                </span>
+                              ) : null}
                             </td>
                           );
                         })}
@@ -502,6 +804,25 @@ export function Viewer() {
       )}
     </div>
   );
+}
+
+function channelOf(log: PreparedLog, key: string | undefined) {
+  if (!key) return undefined;
+  return log.channels.find((channel) => channel.key === key);
+}
+
+function reviewPair(selected: LapProfile[], all: LapProfile[], anchorLap: LapProfile | null) {
+  if (!anchorLap || !selected.length) return null;
+  const others = selected.filter((lap) => lap.num !== anchorLap.num);
+  if (others.length) return { ref: anchorLap, laps: others, implicit: false };
+  const pool = all.filter((lap) => lap.num !== anchorLap.num);
+  if (!pool.length) return null;
+  return { ref: fastest(pool), laps: [anchorLap], implicit: true };
+}
+
+function distanceText(span: NamedSector, templateId: string, length: number) {
+  if (length > 0 && templateId !== "manual") return `${Math.round(span.from * length)}–${Math.round(span.to * length)} m`;
+  return `${(span.from * 100).toFixed(0)}–${(span.to * 100).toFixed(0)}%`;
 }
 
 function fastest<T extends { duration: number; num: number }>(laps: T[]): T {

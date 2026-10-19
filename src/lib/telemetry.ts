@@ -27,6 +27,8 @@ export type PrepChannel = {
 export type PreparedLog = {
   fileName: string;
   vehicle: string;
+  rider: string;
+  when: string;
   track: string;
   channels: PrepChannel[];
   laps: LapProfile[];
@@ -265,6 +267,8 @@ export function prepareLog(log: XrkLog, fileName: string): PreparedLog {
 
   const meta = log.metadata ?? {};
   const vehicle = String(meta.Vehicle ?? meta.vehicle ?? "—");
+  const rider = String(meta.Driver ?? "").trim() || "—";
+  const when = [meta["Log Date"], meta["Log Time"]].map((item) => String(item ?? "").trim()).filter(Boolean).join(" ");
   const track = String(meta.Venue ?? meta.Track ?? meta.track ?? "Session");
   const distanceNote =
     usedGps > 0
@@ -273,10 +277,13 @@ export function prepareLog(log: XrkLog, fileName: string): PreparedLog {
         ? "No usable latitude/longitude. Splits follow distance integrated from speed."
         : "This file has no GPS position or speed, so sectors cannot be placed.";
 
-  return { fileName, vehicle, track, channels, laps, distanceNote };
+  return { fileName, vehicle, rider, when, track, channels, laps, distanceNote };
 }
 
-export function timeAtFraction(profile: LapProfile, fraction: number): number {
+export function timeAtFraction(
+  profile: Pick<LapProfile, "times" | "dist" | "total" | "duration">,
+  fraction: number,
+): number {
   if (fraction <= 0) return 0;
   if (fraction >= 1) return profile.duration;
   const target = fraction * profile.total;
@@ -296,7 +303,10 @@ export function timeAtFraction(profile: LapProfile, fraction: number): number {
   return times[lo - 1]! + u * (times[lo]! - times[lo - 1]!);
 }
 
-export function fractionAtTime(profile: LapProfile, timeSec: number): number {
+export function fractionAtTime(
+  profile: Pick<LapProfile, "times" | "dist" | "total" | "duration">,
+  timeSec: number,
+): number {
   if (timeSec <= 0) return 0;
   if (timeSec >= profile.duration) return 1;
   const { times, dist, total } = profile;
@@ -316,41 +326,592 @@ export function fractionAtTime(profile: LapProfile, timeSec: number): number {
   return Math.min(1, Math.max(0, d / total));
 }
 
-export type SectorRow = {
-  index: number;
+export type SectorKind = "corner" | "link" | "plain";
+export type TurnHand = "LEFT" | "RIGHT";
+export type ApexMode = "speed" | "lean";
+
+/** One piece of the lap, as a fraction of GPS distance. Fractions match across laps. */
+export type NamedSector = {
+  id: string;
+  label: string;
+  kind: SectorKind;
   from: number;
   to: number;
+  apex: number | null;
+  brake: number | null;
+  turn: TurnHand | null;
+  apexMode: ApexMode;
+};
+
+export type SectorRow = NamedSector & {
+  index: number;
   /** Seconds per lap index in the same order as the input profiles. */
   times: number[];
   best: number;
+  /** Index into the laps array that produced `best`. */
+  bestIndex: number;
   bestLap: number;
 };
 
-export function sectorTable(laps: LapProfile[], splits: number[]): SectorRow[] {
-  const bounds = [0, ...[...splits].sort((a, b) => a - b), 1];
-  const rows: SectorRow[] = [];
-  for (let s = 0; s < bounds.length - 1; s++) {
-    const from = bounds[s]!;
-    const to = bounds[s + 1]!;
-    const times = laps.map((lap) => timeAtFraction(lap, to) - timeAtFraction(lap, from));
+export type TrackCorner = {
+  id: string;
+  fromM: number;
+  toM: number;
+  apexM: number;
+  brakeM: number | null;
+  turn: TurnHand;
+  apexMode: ApexMode;
+};
+
+export type TrackTemplate = {
+  id: string;
+  name: string;
+  corners: TrackCorner[];
+};
+
+export type SplitDocument = {
+  v: 2;
+  templateId: string;
+  /** Lap length used to turn template metres into fractions. 0 if unknown. */
+  lapLengthM: number;
+  spans: NamedSector[];
+};
+
+export type SavedTemplate = {
+  name: string;
+  spans: NamedSector[];
+  lapLengthM: number;
+};
+
+/**
+ * Zhuhai International Circuit corners C1–C11.
+ * Distances are metres from the start/finish along the GPS path of the reference
+ * coaching lap (brake onset, apex, and the corner window).
+ */
+export const ZIC_TEMPLATE: TrackTemplate = {
+  id: "zic",
+  name: "ZIC C1–C11",
+  corners: [
+    { id: "C1", fromM: 157, toM: 535, apexM: 435, brakeM: 157, turn: "RIGHT", apexMode: "speed" },
+    { id: "C2", fromM: 678, toM: 928, apexM: 828, brakeM: null, turn: "RIGHT", apexMode: "speed" },
+    { id: "C3", fromM: 946, toM: 1212, apexM: 1112, brakeM: 946, turn: "LEFT", apexMode: "speed" },
+    { id: "C4", fromM: 1334, toM: 1584, apexM: 1484, brakeM: null, turn: "RIGHT", apexMode: "speed" },
+    { id: "C5", fromM: 1595, toM: 1871, apexM: 1771, brakeM: 1595, turn: "RIGHT", apexMode: "speed" },
+    { id: "C6", fromM: 1981, toM: 2162, apexM: 2131, brakeM: null, turn: "RIGHT", apexMode: "lean" },
+    { id: "C7", fromM: 2162, toM: 2431, apexM: 2397, brakeM: 2162, turn: "LEFT", apexMode: "speed" },
+    { id: "C8", fromM: 2431, toM: 2681, apexM: 2581, brakeM: null, turn: "LEFT", apexMode: "speed" },
+    { id: "C9", fromM: 2906, toM: 3234, apexM: 3134, brakeM: 2906, turn: "RIGHT", apexMode: "speed" },
+    { id: "C10", fromM: 3431, toM: 3625, apexM: 3581, brakeM: null, turn: "LEFT", apexMode: "lean" },
+    { id: "C11", fromM: 3625, toM: 3941, apexM: 3841, brakeM: 3625, turn: "RIGHT", apexMode: "speed" },
+  ],
+};
+
+const TEMPLATE_LIBRARY: TrackTemplate[] = [ZIC_TEMPLATE];
+
+export function builtinTemplates(): TrackTemplate[] {
+  return TEMPLATE_LIBRARY;
+}
+
+export function templateById(id: string): TrackTemplate | undefined {
+  return TEMPLATE_LIBRARY.find((item) => item.id === id);
+}
+
+export function median(values: number[]): number {
+  if (!values.length) return 0;
+  const sorted = [...values].sort((a, b) => a - b);
+  return sorted[Math.floor((sorted.length - 1) / 2)]!;
+}
+
+export function formatSigned(seconds: number): string {
+  if (!Number.isFinite(seconds)) return "—";
+  if (Math.abs(seconds) < 0.0005) return "0.000";
+  const sign = seconds > 0 ? "+" : "−";
+  return sign + Math.abs(seconds).toFixed(3);
+}
+
+export function turnTag(turn: TurnHand | null): string {
+  if (turn === "LEFT") return "L";
+  if (turn === "RIGHT") return "R";
+  return "";
+}
+
+export function sectorLabel(span: NamedSector): string {
+  const tag = turnTag(span.turn);
+  return tag && span.kind === "corner" ? `${span.label} ${tag}` : span.label;
+}
+
+function clamp01(value: number): number {
+  return Math.min(1, Math.max(0, value));
+}
+
+function plainSpan(index: number, from: number, to: number): NamedSector {
+  return {
+    id: `S${index}`,
+    label: `S${index}`,
+    kind: "plain",
+    from,
+    to,
+    apex: null,
+    brake: null,
+    turn: null,
+    apexMode: "speed",
+  };
+}
+
+export function spansFromSplits(splits: number[]): NamedSector[] {
+  const edges = [...splits]
+    .filter((value) => typeof value === "number" && value > 0.012 && value < 0.988)
+    .sort((a, b) => a - b);
+  const bounds = [0];
+  for (const edge of edges) {
+    if (edge - bounds[bounds.length - 1]! < 0.008) continue;
+    bounds.push(edge);
+  }
+  if (1 - bounds[bounds.length - 1]! < 0.008) bounds.pop();
+  bounds.push(1);
+  if (bounds.length < 3) return [];
+  const spans: NamedSector[] = [];
+  for (let i = 0; i < bounds.length - 1; i++) {
+    spans.push(plainSpan(i + 1, bounds[i]!, bounds[i + 1]!));
+  }
+  return spans;
+}
+
+function linkSpan(id: string, label: string, from: number, to: number): NamedSector {
+  return {
+    id,
+    label,
+    kind: "link",
+    from,
+    to,
+    apex: null,
+    brake: null,
+    turn: null,
+    apexMode: "speed",
+  };
+}
+
+export function spansFromTemplate(
+  template: TrackTemplate,
+  lapLengthM: number,
+): { spans: NamedSector[]; lapLengthM: number; scaled: boolean } {
+  const length = Math.max(1, lapLengthM);
+  const corners = [...template.corners].sort((a, b) => a.fromM - b.fromM);
+  const maxM = corners.reduce((max, corner) => Math.max(max, corner.toM, corner.apexM), 0);
+  let scale = 1;
+  let scaled = false;
+  if (maxM > length * 0.985) {
+    scale = (length * 0.97) / maxM;
+    scaled = true;
+  }
+  const metres = (value: number) => value * scale;
+  type Piece = NamedSector & { fromM: number; toM: number };
+  const pieces: Piece[] = [];
+  let cursor = 0;
+  let prevId = "S/F";
+  for (const corner of corners) {
+    let fromM = metres(corner.fromM);
+    const toM = Math.max(fromM + 5, metres(corner.toM));
+    if (fromM > cursor + 8) {
+      pieces.push({
+        ...linkSpan(`${prevId}-${corner.id}`, prevId === "S/F" ? `to ${corner.id}` : `${prevId}–${corner.id}`, 0, 0),
+        fromM: cursor,
+        toM: fromM,
+      });
+    } else {
+      fromM = cursor;
+    }
+    const apexM = Math.min(toM - 1, Math.max(fromM + 1, metres(corner.apexM)));
+    const brakeM = corner.brakeM == null ? null : Math.min(toM - 1, Math.max(fromM, metres(corner.brakeM)));
+    pieces.push({
+      id: corner.id,
+      label: corner.id,
+      kind: "corner",
+      from: 0,
+      to: 0,
+      apex: apexM / length,
+      brake: brakeM == null ? null : brakeM / length,
+      turn: corner.turn,
+      apexMode: corner.apexMode,
+      fromM,
+      toM,
+    });
+    cursor = toM;
+    prevId = corner.id;
+  }
+  if (length - cursor > 8) {
+    pieces.push({
+      ...linkSpan(`${prevId}-out`, `${prevId} out`, 0, 0),
+      fromM: cursor,
+      toM: length,
+    });
+  } else if (pieces.length) {
+    pieces[pieces.length - 1]!.toM = length;
+  }
+  const spans = pieces.map((piece) => ({
+    id: piece.id,
+    label: piece.label,
+    kind: piece.kind,
+    from: clamp01(piece.fromM / length),
+    to: clamp01(piece.toM / length),
+    apex: piece.apex,
+    brake: piece.brake,
+    turn: piece.turn,
+    apexMode: piece.apexMode,
+  }));
+  if (spans.length) {
+    spans[0]!.from = 0;
+    spans[spans.length - 1]!.to = 1;
+  }
+  return { spans, lapLengthM: length, scaled };
+}
+
+export function sectorTableFromSpans(
+  laps: readonly Pick<LapProfile, "num" | "times" | "dist" | "total" | "duration">[],
+  spans: readonly NamedSector[],
+): SectorRow[] {
+  return spans.map((span, index) => {
+    const times = laps.map((lap) => timeAtFraction(lap, span.to) - timeAtFraction(lap, span.from));
     let best = Infinity;
-    let bestLap = laps[0]?.num ?? 0;
-    times.forEach((t, i) => {
-      if (t < best) {
-        best = t;
-        bestLap = laps[i]!.num;
+    let bestIndex = 0;
+    times.forEach((time, lapIndex) => {
+      if (time > 0.05 && time < best) {
+        best = time;
+        bestIndex = lapIndex;
       }
     });
-    rows.push({
-      index: s + 1,
-      from,
-      to,
+    return {
+      ...span,
+      index: index + 1,
       times,
       best: Number.isFinite(best) ? best : NaN,
-      bestLap,
+      bestIndex,
+      bestLap: laps[bestIndex]?.num ?? 0,
+    };
+  });
+}
+
+export function sectorTable(laps: LapProfile[], splits: number[]): SectorRow[] {
+  return sectorTableFromSpans(laps, spansFromSplits(splits));
+}
+
+export function moveSpanEdge(spans: readonly NamedSector[], edge: number, fraction: number): NamedSector[] {
+  if (edge < 0 || edge >= spans.length - 1) return spans.map((span) => ({ ...span }));
+  const next = spans.map((span) => ({ ...span }));
+  const lo = next[edge]!.from + 0.006;
+  const hi = next[edge + 1]!.to - 0.006;
+  if (!(hi > lo)) return next;
+  const at = Math.min(hi, Math.max(lo, fraction));
+  next[edge]!.to = at;
+  next[edge + 1]!.from = at;
+  for (const span of [next[edge]!, next[edge + 1]!]) {
+    if (span.apex != null) span.apex = Math.min(span.to - 0.001, Math.max(span.from + 0.001, span.apex));
+    if (span.brake != null) span.brake = Math.min(span.to - 0.001, Math.max(span.from, span.brake));
+  }
+  return next;
+}
+
+export function removeSpanEdge(spans: readonly NamedSector[], edge: number): NamedSector[] {
+  if (edge < 0 || edge >= spans.length - 1) return spans.map((span) => ({ ...span }));
+  const next = spans.map((span) => ({ ...span }));
+  const left = next[edge]!;
+  const right = next[edge + 1]!;
+  left.to = right.to;
+  if (left.apex == null) left.apex = right.apex;
+  if (left.brake == null) left.brake = right.brake;
+  next.splice(edge + 1, 1);
+  if (next.every((span) => span.kind !== "corner")) {
+    return next.map((span, index) => ({ ...span, id: `S${index + 1}`, label: `S${index + 1}`, kind: "plain" as const }));
+  }
+  return next;
+}
+
+function isSector(value: unknown): value is NamedSector {
+  if (!value || typeof value !== "object") return false;
+  const span = value as Partial<NamedSector>;
+  return (
+    typeof span.id === "string" &&
+    typeof span.label === "string" &&
+    (span.kind === "corner" || span.kind === "link" || span.kind === "plain") &&
+    typeof span.from === "number" &&
+    typeof span.to === "number" &&
+    span.to > span.from
+  );
+}
+
+function cleanSpan(span: NamedSector): NamedSector {
+  const from = clamp01(span.from);
+  const to = clamp01(span.to);
+  return {
+    id: span.id,
+    label: span.label,
+    kind: span.kind,
+    from,
+    to: Math.max(from + 0.002, to),
+    apex: typeof span.apex === "number" ? clamp01(span.apex) : null,
+    brake: typeof span.brake === "number" ? clamp01(span.brake) : null,
+    turn: span.turn === "LEFT" || span.turn === "RIGHT" ? span.turn : null,
+    apexMode: span.apexMode === "lean" ? "lean" : "speed",
+  };
+}
+
+export function parseSplitDocument(raw: string | null): SplitDocument | null {
+  if (!raw) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (Array.isArray(parsed) && parsed.every((item) => typeof item === "number")) {
+      return { v: 2, templateId: "manual", lapLengthM: 0, spans: spansFromSplits(parsed) };
+    }
+    if (!parsed || typeof parsed !== "object") return null;
+    const doc = parsed as Partial<SplitDocument>;
+    if (doc.v !== 2 || !Array.isArray(doc.spans)) return null;
+    const spans = doc.spans.filter(isSector).map(cleanSpan);
+    if (spans.length) {
+      spans[0]!.from = 0;
+      spans[spans.length - 1]!.to = 1;
+    }
+    return {
+      v: 2,
+      templateId: typeof doc.templateId === "string" ? doc.templateId : "manual",
+      lapLengthM: typeof doc.lapLengthM === "number" && doc.lapLengthM > 0 ? doc.lapLengthM : 0,
+      spans,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export function serializeSplitDocument(doc: SplitDocument): string {
+  return JSON.stringify(doc);
+}
+
+export function parseSavedTemplates(raw: string | null): SavedTemplate[] {
+  if (!raw) return [];
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((item) => {
+      if (!item || typeof item !== "object") return [];
+      const row = item as Partial<SavedTemplate>;
+      if (typeof row.name !== "string" || !row.name.trim() || !Array.isArray(row.spans)) return [];
+      const spans = row.spans.filter(isSector).map(cleanSpan);
+      if (!spans.length) return [];
+      return [
+        {
+          name: row.name.trim().slice(0, 40),
+          spans,
+          lapLengthM: typeof row.lapLengthM === "number" ? row.lapLengthM : 0,
+        },
+      ];
+    });
+  } catch {
+    return [];
+  }
+}
+
+export function serializeSavedTemplates(list: readonly SavedTemplate[]): string {
+  return JSON.stringify(list);
+}
+
+export type DeltaPoint = { metres: number; delta: number };
+
+/** Cumulative time of `lap` minus `ref` at the same fraction of each lap. Positive means `lap` is behind. */
+export function deltaVsDistance(ref: LapProfile, lap: LapProfile, steps = 240): DeltaPoint[] {
+  const count = Math.max(20, Math.round(steps));
+  const points: DeltaPoint[] = [];
+  for (let i = 0; i <= count; i++) {
+    const fraction = i / count;
+    points.push({
+      metres: fraction * ref.total,
+      delta: timeAtFraction(lap, fraction) - timeAtFraction(ref, fraction),
     });
   }
-  return rows;
+  return points;
+}
+
+export function topSectorLosses(
+  rows: readonly SectorRow[],
+  refIndex: number,
+  lapIndex: number,
+  limit = 3,
+): { row: SectorRow; delta: number }[] {
+  return rows
+    .map((row) => ({ row, delta: (row.times[lapIndex] ?? NaN) - (row.times[refIndex] ?? NaN) }))
+    .filter((item) => Number.isFinite(item.delta) && item.delta > 0.0005)
+    .sort((a, b) => b.delta - a.delta)
+    .slice(0, limit);
+}
+
+export type CoachingKeys = {
+  brake?: string;
+  throttle?: string;
+  lean?: string;
+  speed?: string;
+};
+
+function haystack(channel: { key: string; label: string }): string {
+  return `${channel.label} ${channel.key}`;
+}
+
+function firstChannel(
+  channels: readonly { key: string; label: string }[],
+  tests: readonly RegExp[],
+  reject?: RegExp,
+): string | undefined {
+  for (const test of tests) {
+    const hit = channels.find((channel) => {
+      const name = haystack(channel);
+      if (reject && reject.test(name)) return false;
+      return test.test(name);
+    });
+    if (hit) return hit.key;
+  }
+  return undefined;
+}
+
+/** Brake, throttle, and lean keys, matched to AiM / RaceStudio channel names. */
+export function coachingChannelKeys(channels: readonly { key: string; label: string }[]): CoachingKeys {
+  const brake =
+    firstChannel(channels, [
+      /front[\s_-]*brake|brake[\s_-]*front/i,
+      /brake[\s_-]*(press|pressure)/i,
+      /\bbrake\b/i,
+    ]) ?? firstChannel(channels, [/brake/i]);
+  const throttle = firstChannel(channels, [/twist[\s_-]*grip/i, /throttle/i, /\btps\b/i]);
+  const lean = firstChannel(channels, [/lean[\s_-]*angle/i, /bike[\s_-]*angle/i, /\blean\b/i, /roll[\s_-]*angle/i]);
+  const speed =
+    firstChannel(channels, [/gps[\s_-]*speed/i]) ??
+    firstChannel(channels, [/speed/i], /rate|accur|fix|gps[\s_-]*(lat|lon|heading|alt)/i);
+  return { brake, throttle, lean, speed };
+}
+
+export function isCoachingChannel(channel: { key: string; label: string }): boolean {
+  const keys = coachingChannelKeys([channel]);
+  return Boolean(keys.brake || keys.throttle || keys.lean);
+}
+
+export type MarkerHit = {
+  id: string;
+  label: string;
+  kind: "brake" | "apex";
+  t: number;
+  fraction: number;
+};
+
+export type MarkerInput = {
+  brake: Sample[] | null;
+  brakeUnit: string;
+  speed: Sample[] | null;
+  speedScale: number;
+  lean: Sample[] | null;
+  leanScale: number;
+};
+
+function samplesBetween(samples: Sample[], t0: number, t1: number): Sample[] {
+  return samples.filter((sample) => sample.t >= t0 && sample.t <= t1 && Number.isFinite(sample.v));
+}
+
+function brakeThreshold(unit: string, peak: number): number | null {
+  if (!Number.isFinite(peak) || peak <= 0) return null;
+  if (/bar|psi|kpa|mpa/i.test(unit)) {
+    if (peak < 1.5) return null;
+    return Math.max(0.8, peak * 0.12);
+  }
+  if (/%|percent/i.test(unit)) {
+    if (peak < 5) return null;
+    return Math.max(3, peak * 0.12);
+  }
+  if (peak < 1) return null;
+  return peak * 0.15;
+}
+
+function brakeOnset(samples: Sample[], t0: number, t1: number, unit: string): number | null {
+  const window = samplesBetween(samples, t0, t1);
+  if (window.length < 4 || !(t1 > t0)) return null;
+  let peak = 0;
+  for (const sample of window) if (sample.v > peak) peak = sample.v;
+  const threshold = brakeThreshold(unit, peak);
+  if (threshold == null) return null;
+  for (let i = 1; i < window.length; i++) {
+    const prev = window[i - 1]!;
+    const curr = window[i]!;
+    if (prev.v < threshold && curr.v >= threshold) return curr.t;
+  }
+  if (window[0]!.v >= threshold) return window[0]!.t;
+  return null;
+}
+
+function extremeTime(
+  samples: Sample[],
+  t0: number,
+  t1: number,
+  scale: number,
+  mode: "min" | "maxAbs",
+): number | null {
+  const window = samplesBetween(samples, t0, t1);
+  if (!window.length) return null;
+  let bestScore = mode === "min" ? Infinity : -Infinity;
+  let bestT: number | null = null;
+  for (const sample of window) {
+    const value = sample.v * scale;
+    if (!Number.isFinite(value)) continue;
+    if (mode === "min" && value < 5) continue;
+    const score = mode === "min" ? value : Math.abs(value);
+    const better = mode === "min" ? score < bestScore : score > bestScore;
+    if (better) {
+      bestScore = score;
+      bestT = sample.t;
+    }
+  }
+  return bestT;
+}
+
+export function markersForLap(lap: LapProfile, spans: readonly NamedSector[], input: MarkerInput): MarkerHit[] {
+  const hits: MarkerHit[] = [];
+  for (const span of spans) {
+    if (span.kind !== "corner") continue;
+    const t0 = timeAtFraction(lap, span.from);
+    const t1 = timeAtFraction(lap, span.to);
+    let apexT: number | null = null;
+    if (span.apexMode === "lean" && input.lean?.length) {
+      apexT = extremeTime(input.lean, t0, t1, input.leanScale, "maxAbs");
+    }
+    if (apexT == null && input.speed?.length && span.apexMode !== "lean") {
+      apexT = extremeTime(input.speed, t0, t1, input.speedScale, "min");
+    }
+    if (apexT == null && span.apex != null) apexT = timeAtFraction(lap, span.apex);
+    if (apexT != null) {
+      hits.push({
+        id: span.id,
+        label: span.label,
+        kind: "apex",
+        t: apexT,
+        fraction: fractionAtTime(lap, apexT),
+      });
+    }
+    const searchFrom = timeAtFraction(lap, Math.max(0, (span.brake ?? span.from) - 0.012));
+    const searchTo = apexT != null ? Math.max(searchFrom, Math.min(t1, apexT)) : t1;
+    let brakeT = input.brake?.length ? brakeOnset(input.brake, searchFrom, searchTo, input.brakeUnit) : null;
+    if (brakeT == null && span.brake != null) brakeT = timeAtFraction(lap, span.brake);
+    if (brakeT != null && span.brake != null) {
+      hits.push({
+        id: span.id,
+        label: span.label,
+        kind: "brake",
+        t: brakeT,
+        fraction: fractionAtTime(lap, brakeT),
+      });
+    } else if (brakeT != null && input.brake?.length) {
+      hits.push({
+        id: span.id,
+        label: span.label,
+        kind: "brake",
+        t: brakeT,
+        fraction: fractionAtTime(lap, brakeT),
+      });
+    }
+  }
+  return hits;
 }
 
 export function idealSeconds(rows: SectorRow[]): number {
