@@ -769,10 +769,10 @@ async function askGrok(question: string) {
 function render() {
   const log = state.log;
   const generation = ++renderGeneration;
-  // innerHTML replaces the scroll nodes, which would otherwise jump back to the top.
+  // innerHTML replaces the channel and lap lists, which would otherwise jump back to the top.
   const savedScroll = {
-    page: document.scrollingElement?.scrollTop ?? 0,
-    side: document.querySelector<HTMLElement>("#app .layout > aside")?.scrollTop ?? 0,
+    channels: document.getElementById("channels")?.scrollTop ?? 0,
+    laps: document.getElementById("laps")?.scrollTop ?? 0,
     main: document.querySelector<HTMLElement>("#app .layout > main")?.scrollTop ?? 0,
   };
   if (!log) {
@@ -994,13 +994,11 @@ function render() {
   if (state.compare) paintLaps(state.compare.fileName, state.compare.laps);
   const restoreScroll = () => {
     if (generation !== renderGeneration) return;
-    const active = document.activeElement;
-    if (active instanceof HTMLElement && active.id === "ch-filter") return;
-    const page = document.scrollingElement;
-    const side = document.querySelector<HTMLElement>("#app .layout > aside");
+    const channels = document.getElementById("channels");
+    const laps = document.getElementById("laps");
     const main = document.querySelector<HTMLElement>("#app .layout > main");
-    if (page && Math.abs(page.scrollTop - savedScroll.page) > 1) page.scrollTop = savedScroll.page;
-    if (side && Math.abs(side.scrollTop - savedScroll.side) > 1) side.scrollTop = savedScroll.side;
+    if (channels && Math.abs(channels.scrollTop - savedScroll.channels) > 1) channels.scrollTop = savedScroll.channels;
+    if (laps && Math.abs(laps.scrollTop - savedScroll.laps) > 1) laps.scrollTop = savedScroll.laps;
     if (main && Math.abs(main.scrollTop - savedScroll.main) > 1) main.scrollTop = savedScroll.main;
   };
   restoreScroll();
