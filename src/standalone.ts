@@ -432,6 +432,7 @@ const grokChat: GrokMsg[] = [];
 let grokBusy = false;
 let channelQuery = "";
 let templateDraft = "";
+let renderGeneration = 0;
 
 const app = document.getElementById("app")!;
 
@@ -767,6 +768,13 @@ async function askGrok(question: string) {
 
 function render() {
   const log = state.log;
+  const generation = ++renderGeneration;
+  // innerHTML replaces the scroll nodes, which would otherwise jump back to the top.
+  const savedScroll = {
+    page: document.scrollingElement?.scrollTop ?? 0,
+    side: document.querySelector<HTMLElement>("#app .layout > aside")?.scrollTop ?? 0,
+    main: document.querySelector<HTMLElement>("#app .layout > main")?.scrollTop ?? 0,
+  };
   if (!log) {
     app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open file</button></header>
       <main class="empty"><h2>A coach desk for the lap</h2>
@@ -984,6 +992,20 @@ function render() {
   };
   paintLaps(log.fileName, log.laps);
   if (state.compare) paintLaps(state.compare.fileName, state.compare.laps);
+  const restoreScroll = () => {
+    if (generation !== renderGeneration) return;
+    const active = document.activeElement;
+    if (active instanceof HTMLElement && active.id === "ch-filter") return;
+    const page = document.scrollingElement;
+    const side = document.querySelector<HTMLElement>("#app .layout > aside");
+    const main = document.querySelector<HTMLElement>("#app .layout > main");
+    if (page && Math.abs(page.scrollTop - savedScroll.page) > 1) page.scrollTop = savedScroll.page;
+    if (side && Math.abs(side.scrollTop - savedScroll.side) > 1) side.scrollTop = savedScroll.side;
+    if (main && Math.abs(main.scrollTop - savedScroll.main) > 1) main.scrollTop = savedScroll.main;
+  };
+  restoreScroll();
+  queueMicrotask(restoreScroll);
+  requestAnimationFrame(restoreScroll);
 
   const bar = document.getElementById("bar")!;
   const zones = state.spans

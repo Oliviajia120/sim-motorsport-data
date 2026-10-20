@@ -1,5 +1,7 @@
 *{box-sizing:border-box}
 html,body{margin:0;background:#101214;color:#e7ebef;font-family:Segoe UI,system-ui,sans-serif;height:100%}
+body{overflow:hidden}
+#app{height:100%;min-height:0;display:flex;flex-direction:column}
 button,input,select{font:inherit}
 button{background:#22262c;color:#e7ebef;border:0;border-radius:4px;padding:0.45rem 0.7rem;cursor:pointer}
 button.on,header button,button.go{background:#e85d04;color:#1a0d04;font-weight:650}
@@ -9,8 +11,9 @@ h2{font-size:0.72rem;letter-spacing:.06em;text-transform:uppercase;color:#8e98a3
 .meta{color:#8e98a3;font-family:ui-monospace,monospace;font-size:.85rem}
 .empty{max-width:40rem;margin:4rem auto;padding:0 1.2rem}
 .empty h2{font-size:1.7rem;color:#e7ebef;letter-spacing:0;text-transform:none}
-.layout{display:flex;min-height:calc(100vh - 58px)}
+.layout{display:flex;flex:1;min-height:0}
 aside{width:280px;background:#181b1f;border-right:1px solid #323840;padding:.8rem;overflow:auto}
+.layout > aside,.layout > main{min-height:0}
 aside input{width:100%;margin:0 0 .45rem;background:#101214;color:#e7ebef;border:1px solid #323840;border-radius:4px;padding:.35rem .45rem}
 main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
 .list label{display:grid;grid-template-columns:1rem minmax(0,1fr);align-items:center;column-gap:.5rem;min-height:1.6rem;font-size:.84rem;padding:0}
@@ -19,6 +22,9 @@ main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
 .laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
 .laprow{display:flex;align-items:center;justify-content:space-between;gap:.4rem}
 .laprow i{width:.65rem;height:.65rem;border-radius:99px;display:inline-block}
+.layout > aside{scroll-padding-bottom:6.5rem}
+#laps{padding-bottom:6.5rem}
+@media(max-width:800px){.layout > aside{scroll-padding-bottom:0}#laps{padding-bottom:0}}
 .row{display:flex;justify-content:space-between;align-items:center}
 .link{background:transparent;color:#e85d04;padding:0}
 .card{background:#181b1f;border:1px solid #323840;border-radius:6px;padding:.8rem;margin-bottom:.7rem}
