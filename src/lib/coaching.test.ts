@@ -3,7 +3,9 @@ import {
   ZIC_TEMPLATE,
   coachingChannelKeys,
   deltaVsDistance,
+  fixAtMetres,
   formatSigned,
+  gpsTrack,
   markersForLap,
   parseSplitDocument,
   sectorTableFromSpans,
@@ -128,5 +130,27 @@ const shortLap = spansFromTemplate(ZIC_TEMPLATE, 3000);
 assert.equal(shortLap.scaled, true);
 assert.equal(shortLap.spans[shortLap.spans.length - 1]?.to, 1);
 assert.ok(shortLap.spans.every((span) => span.to <= 1 && span.from >= 0 && span.to > span.from));
+
+const lat: Sample[] = [
+  { t: 0, v: 22 },
+  { t: 1, v: 22.0004 },
+  { t: 2, v: 22.0008 },
+];
+const lon: Sample[] = [
+  { t: 0, v: 113 },
+  { t: 1, v: 113 },
+  { t: 2, v: 113 },
+];
+const track = gpsTrack(lat, lon);
+assert.equal(track.length, 3);
+assert.equal(track[0]?.d, 0);
+assert.ok(track[2]!.d > 80 && track[2]!.d < 100, `northbound length ${track[2]?.d}`);
+const mid = fixAtMetres(track, track[2]!.d / 2);
+assert.ok(mid && Math.abs(mid.lat - 22.0004) < 1e-6, `mid lat ${mid?.lat}`);
+assert.equal(fixAtMetres(track, -10)?.d, 0);
+assert.equal(fixAtMetres(track, 9999)?.lat, 22.0008);
+assert.equal(gpsTrack([{ t: 0, v: 0 }, { t: 1, v: 22 }], [{ t: 0, v: 0 }, { t: 1, v: 113 }]).length, 1);
+assert.equal(gpsTrack([{ t: 0, v: 22 }, { t: 1, v: 23 }], [{ t: 0, v: 113 }, { t: 1, v: 113 }]).length, 1);
+assert.equal(fixAtMetres([], 0), null);
 
 console.log("coaching maths ok");

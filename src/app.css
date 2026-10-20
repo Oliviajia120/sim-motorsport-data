@@ -52,6 +52,9 @@ main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0;min-height:0}
 .plot canvas{display:block;width:100%}
 .delta-plot{background:#181b1f;border:1px solid #323840;border-radius:4px;overflow:hidden;min-height:2rem}
 .delta-plot canvas{display:block;width:100%;cursor:crosshair}
+.review{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,340px);gap:.75rem;align-items:start}
+.track-map{height:280px;background:#181b1f;border:1px solid #323840;border-radius:4px;overflow:hidden}
+.track-map canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
 table{width:100%;border-collapse:collapse;font-size:.85rem;background:#181b1f}
 th,td{padding:.4rem .6rem;border-bottom:1px solid #323840;text-align:right;font-family:ui-monospace,monospace}
 th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left;font-family:Segoe UI,system-ui,sans-serif}
@@ -69,4 +72,4 @@ td .d{display:block;font-size:.72rem;font-weight:650}
 .grok-log p{margin:.35rem 0;white-space:pre-wrap}
 .grok-log .me{color:#f0c14d}
 .grok-panel a{color:#e85d04}
-@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:48vh;grid-template-rows:auto auto minmax(3.2rem,16vh) auto minmax(6.5rem,1fr)}.list{max-height:16vh}}
+@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:48vh;grid-template-rows:auto auto minmax(3.2rem,16vh) auto minmax(6.5rem,1fr)}.list{max-height:16vh}.review{grid-template-columns:1fr}}

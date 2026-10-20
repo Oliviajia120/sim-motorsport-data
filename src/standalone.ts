@@ -5,9 +5,11 @@ import {
   deltaVsDistance,
   downsample,
   equalSplits,
+  fixAtMetres,
   formatLap,
   formatSigned,
   fractionAtTime,
+  gpsTrack,
   idealSeconds,
   isCoachingChannel,
   lapColor,
@@ -26,6 +28,7 @@ import {
   timeAtFraction,
   topSectorLosses,
   ZIC_TEMPLATE,
+  type GpsFix,
   type MarkerHit,
   type NamedSector,
   type Sample,
@@ -43,6 +46,8 @@ type LapProfile = {
   source: "gps" | "speed";
   side: "A" | "B";
   id: string;
+  /** Accepted GPS fixes for this lap. Empty when distance came from speed. */
+  path: GpsFix[];
 };
 type PrepChannel = { key: string; label: string; unit: string; scale: number; channel: XrkChannel };
 type Prepared = {
@@ -116,6 +121,7 @@ function profileFromPoints(
   times: number[],
   dist: number[],
   source: "gps" | "speed",
+  path: GpsFix[] = [],
 ): LapProfile | null {
   if (times.length < 2 || dist[dist.length - 1]! < 50) return null;
   const total = dist[dist.length - 1]!;
@@ -127,34 +133,21 @@ function profileFromPoints(
     times.push(duration);
     dist.push(total);
   }
-  return { num, startMs, endMs, duration, times, dist, total, source, side: "A", id: `A${num}` };
+  return { num, startMs, endMs, duration, times, dist, total, source, side: "A", id: `A${num}`, path };
 }
 
 function profileFromGps(num: number, startMs: number, endMs: number, duration: number, lat: Sample[], lon: Sample[]) {
-  const n = Math.min(lat.length, lon.length);
-  const times: number[] = [];
-  const dist: number[] = [];
-  let acc = 0;
-  let prevLat = 0;
-  let prevLon = 0;
-  let has = false;
-  for (let i = 0; i < n; i++) {
-    const la = lat[i]!.v;
-    const lo = lon[i]!.v;
-    if (Math.abs(la) > 90 || Math.abs(lo) > 180) continue;
-    if (Math.abs(la) < 0.01 && Math.abs(lo) < 0.01) continue;
-    if (has) {
-      const step = haversine(prevLat, prevLon, la, lo);
-      if (step > 80) continue;
-      acc += step;
-    }
-    times.push(lat[i]!.t);
-    dist.push(acc);
-    prevLat = la;
-    prevLon = lo;
-    has = true;
-  }
-  return profileFromPoints(num, startMs, endMs, duration, times, dist, "gps");
+  const path = gpsTrack(lat, lon);
+  return profileFromPoints(
+    num,
+    startMs,
+    endMs,
+    duration,
+    path.map((fix) => fix.t),
+    path.map((fix) => fix.d),
+    "gps",
+    path,
+  );
 }
 
 function profileFromSpeed(
@@ -853,12 +846,21 @@ function render() {
           <div id="table"></div>
         </section>
         <section class="card delta-card">
-          <div class="kicker">Time delta vs distance</div>
-          <p id="delta-legend" class="hint">Positive is behind the reference (lost time). Negative is ahead of the reference (gained time).</p>
-          <div id="delta" class="delta-plot"></div>
+          <div class="review">
+            <div>
+              <div class="kicker">Time delta vs distance</div>
+              <p id="delta-legend" class="hint">Positive is behind the reference (lost time). Negative is ahead of the reference (gained time).</p>
+              <div id="delta" class="delta-plot"></div>
+            </div>
+            <div>
+              <div class="kicker">Track</div>
+              <div id="track" class="track-map"></div>
+              <p id="track-caption" class="hint">Hover a graph or drag the map. The dot is that distance along the lap.</p>
+            </div>
+          </div>
         </section>
-        <p class="hint">${missingCoach.length ? `Coaching overlays look for brake, throttle, and lean. This file has no ${listWords(missingCoach)} channel.` : "Brake, throttle, and lean are the default overlays. ▲ brake on, ◆ apex."}</p>
-        <p id="readout" class="readout"><span class="hint">Move across a graph. Channel values line up here.</span></p>
+        <p class="hint">${missingCoach.length ? `Coaching overlays look for brake, throttle, and lean. This file has no ${listWords(missingCoach)} channel.` : "Brake, throttle, and lean are the default overlays. ▲ brake on, ◆ apex. The track dot uses the same cursor."}</p>
+        <p id="readout" class="readout"><span class="hint">Move across a graph. The track dot and channel values follow.</span></p>
         <div id="plots"></div>
       </main>
     </div>
@@ -1022,7 +1024,12 @@ function render() {
     render();
   };
   bar.onpointermove = (e) => {
-    if (state.drag == null) return;
+    if (state.drag == null) {
+      const rect = bar.getBoundingClientRect();
+      const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / Math.max(rect.width, 1)));
+      seekDistance(fraction);
+      return;
+    }
     state.spans = moveSpanEdge(state.spans, state.drag, fracOf(e));
     const nodes = bar.querySelectorAll<HTMLElement>(".mark");
     state.spans.slice(0, -1).forEach((span, index) => {
@@ -1113,7 +1120,12 @@ function render() {
       const text = Number.isFinite(v) ? v.toFixed(1) : "—";
       draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t, text, p.markers);
     }
+    const fraction = anchor ? fractionAtTime(anchor, t) : null;
+    redrawDelta(fraction);
+    drawTrack(fraction);
+    syncChrome(fraction);
   };
+  onCursor = moveCursor;
   paintDelta(laps);
   for (const ch of shown) {
     const wrap = document.createElement("div");
@@ -1165,6 +1177,11 @@ function render() {
       addSplit(fractionAtTime(anchor, t));
       render();
     };
+  }
+  if (state.cursor != null) moveCursor(state.cursor);
+  else {
+    drawTrack(null);
+    syncChrome(null);
   }
 
   if (rows.length && session.length) {
@@ -1369,6 +1386,7 @@ function drawDelta(
   series: { name: string; color: string; dash?: boolean; points: { metres: number; delta: number }[] }[],
   metresMax: number,
   bands: { from: number; to: number }[],
+  cursorMetres: number | null = null,
 ) {
   const ctx = canvas.getContext("2d");
   if (!ctx) return;
@@ -1475,6 +1493,15 @@ function drawDelta(
   }
   ctx.restore();
   ctx.setLineDash([]);
+  if (cursorMetres != null) {
+    const x = xOf(cursorMetres);
+    ctx.strokeStyle = "#ffffff";
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(x, pad.t);
+    ctx.lineTo(x, pad.t + plotH);
+    ctx.stroke();
+  }
   ctx.fillStyle = "#e7ebef";
   ctx.font = "600 12px sans-serif";
   ctx.fillText("Time delta  ·  s", pad.l, 14);
@@ -1485,23 +1512,38 @@ function drawDelta(
   ctx.fillText(end, width - pad.r - ctx.measureText(end).width, height - 8);
 }
 
+type DeltaView = {
+  canvas: HTMLCanvasElement;
+  host: HTMLElement;
+  series: { name: string; color: string; dash?: boolean; points: { metres: number; delta: number }[] }[];
+  metresMax: number;
+  bands: { from: number; to: number }[];
+};
+let deltaView: DeltaView | null = null;
+
+function redrawDelta(fraction: number | null) {
+  if (!deltaView) return;
+  drawDelta(
+    deltaView.canvas,
+    deltaView.host,
+    deltaView.series,
+    deltaView.metresMax,
+    deltaView.bands,
+    fraction == null ? null : fraction * deltaView.metresMax,
+  );
+}
+
 function paintDelta(drawnLaps: LapProfile[]) {
   const host = document.getElementById("delta");
-  const legend = document.getElementById("delta-legend");
   if (!host) return;
   const pair = reviewPair();
   if (!pair || !drawnLaps.length) {
+    deltaView = null;
     host.innerHTML = `<p class="hint">Check two laps, or one lap, to plot time gained and lost against the reference.</p>`;
     return;
   }
   const ref = pair.ref;
   const compares = pair.laps;
-  const intro = pair.implicit
-    ? `Reference is ${lapName(ref)}, the best other full lap. ${compares.map(lapName).join(", ")} is the lap being reviewed.`
-    : `Reference is ${lapName(ref)}. Comparing ${compares.map(lapName).join(", ")}.`;
-  if (legend) {
-    legend.textContent = `${intro} Positive is behind the reference (lost time). Negative is ahead of the reference (gained time). Shaded bands are the named corners.`;
-  }
   const canvas = document.createElement("canvas");
   host.replaceChildren(canvas);
   const series = compares.map((lap) => ({
@@ -1513,21 +1555,319 @@ function paintDelta(drawnLaps: LapProfile[]) {
   const bands = state.spans
     .filter((span) => span.kind === "corner")
     .map((span) => ({ from: span.from * ref.total, to: span.to * ref.total }));
-  drawDelta(canvas, host, series, ref.total, bands);
+  deltaView = { canvas, host, series, metresMax: ref.total, bands };
+  const fraction = cursorFraction();
+  drawDelta(canvas, host, series, ref.total, bands, fraction == null ? null : fraction * ref.total);
   host.onpointermove = (event) => {
     const rect = canvas.getBoundingClientRect();
     const plotW = rect.width - 64;
-    if (plotW <= 0 || !legend) return;
+    if (plotW <= 0) return;
     const x = Math.min(plotW, Math.max(0, event.clientX - rect.left - 52));
-    const metres = (x / plotW) * ref.total;
-    const fraction = ref.total > 0 ? metres / ref.total : 0;
-    const bits = compares.map((lap) => {
-      const gap = timeAtFraction(lap, fraction) - timeAtFraction(ref, fraction);
-      const word = gap > 0.0005 ? "behind" : gap < -0.0005 ? "ahead" : "level";
-      return `${lapName(lap)} ${formatSigned(gap)} s ${word}`;
-    });
-    legend.textContent = `${Math.round(metres)} m along ${lapName(ref)} · ${bits.join(" · ")}. Positive is behind. Negative is ahead.`;
+    seekDistance(plotW > 0 ? x / plotW : 0);
   };
+}
+
+let onCursor: (time: number) => void = (time) => {
+  state.cursor = time;
+};
+
+function cursorFraction(): number | null {
+  if (state.cursor == null) return null;
+  const anchor = anchorLap();
+  if (!anchor) return null;
+  return fractionAtTime(anchor, state.cursor);
+}
+
+function seekDistance(fraction: number) {
+  const anchor = anchorLap();
+  if (!anchor || !Number.isFinite(fraction)) return;
+  onCursor(timeAtFraction(anchor, Math.min(1, Math.max(0, fraction))));
+}
+
+function mapLaps(): LapProfile[] {
+  const selected = chosen();
+  const pair = reviewPair();
+  const list = [...selected];
+  if (pair && !list.some((lap) => lap.id === pair.ref.id)) list.unshift(pair.ref);
+  return list;
+}
+
+function trackCaption(fraction: number | null): string {
+  const drawn = mapLaps().filter((lap) => lap.path.length > 1);
+  if (!drawn.length) return "No GPS latitude/longitude for the laps on the graph, so the map stays empty.";
+  const anchor = anchorLap();
+  if (fraction == null || !anchor) return "Hover a graph, the delta plot, or the split bar. Drag the map to move the cursor.";
+  const ruler = reviewPair()?.ref ?? anchor;
+  const metres = fraction * ruler.total;
+  const span = state.spans.find((item) => fraction >= item.from && fraction <= item.to);
+  const where = span ? sectorLabel(span) : "";
+  return `${Math.round(metres).toLocaleString("en-US")} m along ${lapName(ruler)}${where ? ` · ${where}` : ""}`;
+}
+
+function syncChrome(fraction: number | null) {
+  const legend = document.getElementById("delta-legend");
+  const caption = document.getElementById("track-caption");
+  const pair = reviewPair();
+  if (legend) {
+    if (!pair) {
+      legend.textContent = "Check two laps, or one lap, to plot time gained and lost against the reference.";
+    } else if (fraction == null) {
+      const intro = pair.implicit
+        ? `Reference is ${lapName(pair.ref)}, the best other full lap. ${pair.laps.map(lapName).join(", ")} is the lap being reviewed.`
+        : `Reference is ${lapName(pair.ref)}. Comparing ${pair.laps.map(lapName).join(", ")}.`;
+      legend.textContent = `${intro} Positive is behind the reference (lost time). Negative is ahead of the reference (gained time). Shaded bands are the named corners.`;
+    } else {
+      const metres = fraction * pair.ref.total;
+      const bits = pair.laps.map((lap) => {
+        const gap = timeAtFraction(lap, fraction) - timeAtFraction(pair.ref, fraction);
+        const word = gap > 0.0005 ? "behind" : gap < -0.0005 ? "ahead" : "level";
+        return `${lapName(lap)} ${formatSigned(gap)} s ${word}`;
+      });
+      legend.textContent = `${Math.round(metres)} m along ${lapName(pair.ref)} · ${bits.join(" · ")}. Positive is behind. Negative is ahead.`;
+    }
+  }
+  if (caption) caption.textContent = trackCaption(fraction);
+}
+
+type ScreenPt = { x: number; y: number; d: number };
+type MapPath = { lap: LapProfile; pts: ScreenPt[] };
+type MapFrame = { paths: MapPath[]; width: number; height: number };
+let mapFrame: MapFrame | null = null;
+
+function closestFraction(frame: MapFrame, x: number, y: number): number | null {
+  let best = 36 * 36;
+  let fraction: number | null = null;
+  for (const path of frame.paths) {
+    const total = path.lap.total;
+    if (total <= 0) continue;
+    const pts = path.pts;
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i - 1]!;
+      const b = pts[i]!;
+      const dx = b.x - a.x;
+      const dy = b.y - a.y;
+      const len2 = dx * dx + dy * dy;
+      let u = len2 > 1e-6 ? ((x - a.x) * dx + (y - a.y) * dy) / len2 : 0;
+      if (u < 0) u = 0;
+      else if (u > 1) u = 1;
+      const px = a.x + u * dx;
+      const py = a.y + u * dy;
+      const dist2 = (px - x) ** 2 + (py - y) ** 2;
+      if (dist2 < best) {
+        best = dist2;
+        fraction = (a.d + u * (b.d - a.d)) / total;
+      }
+    }
+  }
+  return fraction;
+}
+
+function drawDot(ctx: CanvasRenderingContext2D, x: number, y: number, color: string, radius: number) {
+  ctx.beginPath();
+  ctx.fillStyle = "#ffffff";
+  ctx.arc(x, y, radius + 2.2, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.beginPath();
+  ctx.fillStyle = color;
+  ctx.arc(x, y, radius, 0, Math.PI * 2);
+  ctx.fill();
+}
+
+function drawTrack(fraction: number | null) {
+  const host = document.getElementById("track");
+  if (!host) return;
+  let canvas = host.querySelector("canvas");
+  if (!canvas) {
+    canvas = document.createElement("canvas");
+    host.replaceChildren(canvas);
+    const seek = (event: PointerEvent) => {
+      if (!mapFrame || !canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const hit = closestFraction(mapFrame, event.clientX - rect.left, event.clientY - rect.top);
+      if (hit == null) return;
+      seekDistance(hit);
+    };
+    canvas.onpointerdown = (event) => {
+      canvas!.setPointerCapture(event.pointerId);
+      seek(event);
+    };
+    canvas.onpointermove = (event) => {
+      if ((event.buttons & 1) === 0) return;
+      seek(event);
+    };
+  }
+  const ctx = canvas.getContext("2d");
+  if (!ctx) return;
+  const width = host.clientWidth || 320;
+  const height = host.clientHeight || 280;
+  const dpr = Math.min(devicePixelRatio || 1, 2);
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  canvas.style.width = "100%";
+  canvas.style.height = "100%";
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = "#181b1f";
+  ctx.fillRect(0, 0, width, height);
+
+  const laps = mapLaps().filter((lap) => lap.path.length > 1);
+  if (!laps.length) {
+    mapFrame = null;
+    ctx.fillStyle = "#8e98a3";
+    ctx.font = "13px sans-serif";
+    ctx.fillText("No GPS path for the selected laps.", 16, 28);
+    return;
+  }
+
+  let latSum = 0;
+  let lonSum = 0;
+  let count = 0;
+  for (const lap of laps) {
+    for (const fix of lap.path) {
+      latSum += fix.lat;
+      lonSum += fix.lon;
+      count += 1;
+    }
+  }
+  const lat0 = latSum / count;
+  const lon0 = lonSum / count;
+  const mLat = 111320;
+  const mLon = 111320 * Math.cos((lat0 * Math.PI) / 180);
+  let minX = Infinity;
+  let maxX = -Infinity;
+  let minY = Infinity;
+  let maxY = -Infinity;
+  for (const lap of laps) {
+    for (const fix of lap.path) {
+      const x = (fix.lon - lon0) * mLon;
+      const y = (fix.lat - lat0) * mLat;
+      if (x < minX) minX = x;
+      if (x > maxX) maxX = x;
+      if (y < minY) minY = y;
+      if (y > maxY) maxY = y;
+    }
+  }
+  const pad = 34;
+  const worldW = Math.max(maxX - minX, 1);
+  const worldH = Math.max(maxY - minY, 1);
+  const plotW = Math.max(1, width - pad * 2);
+  const plotH = Math.max(1, height - pad * 2);
+  const scale = Math.min(plotW / worldW, plotH / worldH);
+  const ox = pad + (plotW - worldW * scale) / 2;
+  const oy = pad + (plotH - worldH * scale) / 2;
+  const screen = (fix: GpsFix): ScreenPt => ({
+    x: ox + ((fix.lon - lon0) * mLon - minX) * scale,
+    y: oy + (maxY - (fix.lat - lat0) * mLat) * scale,
+    d: fix.d,
+  });
+  const paths: MapPath[] = laps.map((lap) => ({ lap, pts: lap.path.map(screen) }));
+  mapFrame = { paths, width, height };
+
+  const anchor = anchorLap();
+  const pair = reviewPair();
+  const ordered = [...paths].sort((a, b) => {
+    const rank = (lap: LapProfile) => (anchor && lap.id === anchor.id ? 2 : pair && lap.id === pair.ref.id ? 0 : 1);
+    return rank(a.lap) - rank(b.lap);
+  });
+  ctx.lineJoin = "round";
+  ctx.lineCap = "round";
+  for (const path of ordered) {
+    const active = anchor?.id === path.lap.id;
+    const referenceOnly = pair?.ref.id === path.lap.id && !active;
+    ctx.beginPath();
+    ctx.strokeStyle = colorOf(path.lap);
+    ctx.globalAlpha = active ? 1 : 0.82;
+    ctx.lineWidth = active ? 2.8 : 1.8;
+    ctx.setLineDash(path.lap.side === "B" || referenceOnly ? [6, 4] : []);
+    path.pts.forEach((pt, index) => {
+      if (index === 0) ctx.moveTo(pt.x, pt.y);
+      else ctx.lineTo(pt.x, pt.y);
+    });
+    ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  ctx.globalAlpha = 1;
+
+  const labelHost = paths.find((path) => path.lap.id === anchor?.id) ?? paths[0]!;
+  let cx = 0;
+  let cy = 0;
+  for (const pt of labelHost.pts) {
+    cx += pt.x;
+    cy += pt.y;
+  }
+  cx /= labelHost.pts.length;
+  cy /= labelHost.pts.length;
+  const placeLabel = (x: number, y: number, text: string) => {
+    const vx = x - cx;
+    const vy = y - cy;
+    const len = Math.hypot(vx, vy) || 1;
+    const lx = Math.min(width - 16, Math.max(16, x + (vx / len) * 15));
+    const ly = Math.min(height - 12, Math.max(12, y + (vy / len) * 15));
+    ctx.font = "600 11px ui-monospace, monospace";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "middle";
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#101214";
+    ctx.strokeText(text, lx, ly);
+    ctx.fillStyle = "#f0c14d";
+    ctx.fillText(text, lx, ly);
+  };
+  const start = labelHost.pts[0];
+  if (start) {
+    ctx.fillStyle = "#e7ebef";
+    ctx.fillRect(start.x - 3.5, start.y - 3.5, 7, 7);
+    placeLabel(start.x, start.y, "S/F");
+  }
+  if (state.templateId === "zic") {
+    for (const span of state.spans) {
+      if (span.kind !== "corner") continue;
+      const at = span.apex ?? (span.from + span.to) / 2;
+      const fix = fixAtMetres(labelHost.lap.path, at * labelHost.lap.total);
+      if (!fix) continue;
+      const pt = screen(fix);
+      ctx.fillStyle = "#f0c14d";
+      ctx.beginPath();
+      ctx.arc(pt.x, pt.y, 2.2, 0, Math.PI * 2);
+      ctx.fill();
+      placeLabel(pt.x, pt.y, span.label);
+    }
+  }
+
+  if (fraction == null) return;
+  const markerAt = (lap: LapProfile) => {
+    const fix = fixAtMetres(lap.path, fraction * lap.total);
+    return fix ? screen(fix) : null;
+  };
+  for (const path of ordered) {
+    if (anchor && path.lap.id === anchor.id) continue;
+    const pt = markerAt(path.lap);
+    if (!pt) continue;
+    ctx.beginPath();
+    ctx.strokeStyle = "#101214";
+    ctx.lineWidth = 4;
+    ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.strokeStyle = colorOf(path.lap);
+    ctx.lineWidth = 2;
+    ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+    ctx.stroke();
+  }
+  if (anchor) {
+    const pt = markerAt(anchor);
+    if (pt) {
+      const aheadFix = fixAtMetres(anchor.path, Math.min(anchor.total, fraction * anchor.total + Math.max(12, anchor.total * 0.012)));
+      if (aheadFix && anchor.path.length) {
+        const tip = screen(aheadFix);
+        ctx.strokeStyle = "#ffffff";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(pt.x, pt.y);
+        ctx.lineTo(tip.x, tip.y);
+        ctx.stroke();
+      }
+      drawDot(ctx, pt.x, pt.y, colorOf(anchor), 4.5);
+    }
+  }
 }
 
 function exportLaps(): LapProfile[] {
