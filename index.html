@@ -25,7 +25,7 @@ main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0;min-height:0}
 .list label{display:grid;grid-template-columns:1rem minmax(0,1fr);align-items:center;column-gap:.5rem;min-height:1.6rem;font-size:.84rem;padding:0 .35rem}
 .list label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .list input{margin:0;width:1rem;height:1rem;justify-self:center}
-#laps{min-height:0;overflow-y:auto;overscroll-behavior:contain}
+#laps{min-height:0;overflow-y:auto;overscroll-behavior:contain;padding-bottom:6.5rem;scroll-padding-bottom:6.5rem}
 .laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
 .laprow{display:flex;align-items:center;justify-content:space-between;gap:.4rem}
 .laprow i{width:.65rem;height:.65rem;border-radius:99px;display:inline-block}
@@ -79,7 +79,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
 .grok-log p{margin:.35rem 0;white-space:pre-wrap}
 .grok-log .me{color:#f0c14d}
 .grok-panel a{color:#e85d04}
-@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:48vh;grid-template-rows:auto auto minmax(3.2rem,16vh) auto minmax(6.5rem,1fr)}.list{max-height:16vh}.review{grid-template-columns:1fr}}
+@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:48vh;grid-template-rows:auto auto minmax(3.2rem,16vh) auto minmax(6.5rem,1fr)}.list{max-height:16vh}#laps{padding-bottom:0;scroll-padding-bottom:0}.review{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -3195,6 +3195,7 @@ ${cursor}
   var grokBusy = false;
   var channelQuery = "";
   var templateDraft = "";
+  var renderGeneration = 0;
   var app = document.getElementById("app");
   function fastest(laps) {
     return laps.reduce((b, l) => l.duration < b.duration ? l : b);
@@ -3499,6 +3500,12 @@ File B: ${state.compare.fileName}` : ""}`,
   }
   function render() {
     const log = state.log;
+    const generation = ++renderGeneration;
+    const savedScroll = {
+      channels: document.getElementById("channels")?.scrollTop ?? 0,
+      laps: document.getElementById("laps")?.scrollTop ?? 0,
+      main: document.querySelector("#app .layout > main")?.scrollTop ?? 0
+    };
     if (!log) {
       app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open file</button></header>
       <main class="empty"><h2>A coach desk for the lap</h2>
@@ -3709,6 +3716,18 @@ File B: ${state.compare.fileName}` : ""}`,
     };
     paintLaps(log.fileName, log.laps);
     if (state.compare) paintLaps(state.compare.fileName, state.compare.laps);
+    const restoreScroll = () => {
+      if (generation !== renderGeneration) return;
+      const channels = document.getElementById("channels");
+      const laps2 = document.getElementById("laps");
+      const main = document.querySelector("#app .layout > main");
+      if (channels && Math.abs(channels.scrollTop - savedScroll.channels) > 1) channels.scrollTop = savedScroll.channels;
+      if (laps2 && Math.abs(laps2.scrollTop - savedScroll.laps) > 1) laps2.scrollTop = savedScroll.laps;
+      if (main && Math.abs(main.scrollTop - savedScroll.main) > 1) main.scrollTop = savedScroll.main;
+    };
+    restoreScroll();
+    queueMicrotask(restoreScroll);
+    requestAnimationFrame(restoreScroll);
     const bar = document.getElementById("bar");
     const zones = state.spans.filter((span) => span.kind === "corner").map((span) => `<div class="zone" style="left:${span.from * 100}%;width:${Math.max(0, span.to - span.from) * 100}%"><span>${esc(span.label)}</span></div>`).join("");
     const marks = state.spans.slice(0, -1).map((span, index) => `<div class="mark" data-edge="${index}" style="left:${span.to * 100}%"><b></b><span>${esc(span.kind === "plain" ? String(index + 1) : "")}</span></div>`).join("");
