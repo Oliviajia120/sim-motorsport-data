@@ -56,6 +56,9 @@ main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
 .plot canvas{display:block;width:100%}
 .delta-plot{background:#181b1f;border:1px solid #323840;border-radius:4px;overflow:hidden;min-height:2rem}
 .delta-plot canvas{display:block;width:100%;cursor:crosshair}
+.review{display:grid;grid-template-columns:minmax(0,1fr) minmax(240px,340px);gap:.75rem;align-items:start}
+.track-map{height:280px;background:#181b1f;border:1px solid #323840;border-radius:4px;overflow:hidden}
+.track-map canvas{display:block;width:100%;height:100%;cursor:crosshair;touch-action:none}
 table{width:100%;border-collapse:collapse;font-size:.85rem;background:#181b1f}
 th,td{padding:.4rem .6rem;border-bottom:1px solid #323840;text-align:right;font-family:ui-monospace,monospace}
 th:first-child,td:first-child,th:nth-child(2),td:nth-child(2){text-align:left;font-family:Segoe UI,system-ui,sans-serif}
@@ -73,7 +76,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
 .grok-log p{margin:.35rem 0;white-space:pre-wrap}
 .grok-log .me{color:#f0c14d}
 .grok-panel a{color:#e85d04}
-@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:40vh}}
+@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:40vh}.review{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
@@ -2348,6 +2351,63 @@ ${cursor}
     const s = (abs - m * 60).toFixed(3).padStart(6, "0");
     return m > 0 ? `${sign}${m}:${s}` : `${sign}${s}`;
   }
+  function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371e3;
+    const toR = Math.PI / 180;
+    const dLat = (lat2 - lat1) * toR;
+    const dLon = (lon2 - lon1) * toR;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  function gpsTrack(lat, lon) {
+    const n = Math.min(lat.length, lon.length);
+    const track = [];
+    let acc = 0;
+    let prevLat = 0;
+    let prevLon = 0;
+    let hasPrev = false;
+    for (let i = 0; i < n; i++) {
+      const la = lat[i].v;
+      const lo = lon[i].v;
+      if (Math.abs(la) > 90 || Math.abs(lo) > 180) continue;
+      if (Math.abs(la) < 0.01 && Math.abs(lo) < 0.01) continue;
+      const t = lat[i].t;
+      if (hasPrev) {
+        const step = haversine(prevLat, prevLon, la, lo);
+        if (step > 80) continue;
+        acc += step;
+      }
+      track.push({ t, lat: la, lon: lo, d: acc });
+      prevLat = la;
+      prevLon = lo;
+      hasPrev = true;
+    }
+    return track;
+  }
+  function fixAtMetres(track, metres) {
+    if (!track.length) return null;
+    const first = track[0];
+    const last2 = track[track.length - 1];
+    if (metres <= first.d) return { ...first };
+    if (metres >= last2.d) return { ...last2 };
+    let lo = 0;
+    let hi = track.length - 1;
+    while (lo < hi) {
+      const mid = lo + hi >> 1;
+      if (track[mid].d < metres) lo = mid + 1;
+      else hi = mid;
+    }
+    const b = track[lo];
+    const a = track[Math.max(0, lo - 1)];
+    const span = b.d - a.d;
+    const u = span > 1e-6 ? (metres - a.d) / span : 0;
+    return {
+      t: a.t + u * (b.t - a.t),
+      lat: a.lat + u * (b.lat - a.lat),
+      lon: a.lon + u * (b.lon - a.lon),
+      d: metres
+    };
+  }
   function timeAtFraction(profile, fraction) {
     if (fraction <= 0) return 0;
     if (fraction >= 1) return profile.duration;
@@ -2859,7 +2919,7 @@ ${cursor}
     }
     return out;
   }
-  function haversine(lat1, lon1, lat2, lon2) {
+  function haversine2(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const toR = Math.PI / 180;
     const dLat = (lat2 - lat1) * toR;
@@ -2867,7 +2927,7 @@ ${cursor}
     const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
   }
-  function profileFromPoints(num, startMs, endMs, duration, times, dist, source) {
+  function profileFromPoints(num, startMs, endMs, duration, times, dist, source, path = []) {
     if (times.length < 2 || dist[dist.length - 1] < 50) return null;
     const total = dist[dist.length - 1];
     if (times[0] > 0.05) {
@@ -2878,33 +2938,20 @@ ${cursor}
       times.push(duration);
       dist.push(total);
     }
-    return { num, startMs, endMs, duration, times, dist, total, source, side: "A", id: `A${num}` };
+    return { num, startMs, endMs, duration, times, dist, total, source, side: "A", id: `A${num}`, path };
   }
   function profileFromGps(num, startMs, endMs, duration, lat, lon) {
-    const n = Math.min(lat.length, lon.length);
-    const times = [];
-    const dist = [];
-    let acc = 0;
-    let prevLat = 0;
-    let prevLon = 0;
-    let has = false;
-    for (let i = 0; i < n; i++) {
-      const la = lat[i].v;
-      const lo = lon[i].v;
-      if (Math.abs(la) > 90 || Math.abs(lo) > 180) continue;
-      if (Math.abs(la) < 0.01 && Math.abs(lo) < 0.01) continue;
-      if (has) {
-        const step = haversine(prevLat, prevLon, la, lo);
-        if (step > 80) continue;
-        acc += step;
-      }
-      times.push(lat[i].t);
-      dist.push(acc);
-      prevLat = la;
-      prevLon = lo;
-      has = true;
-    }
-    return profileFromPoints(num, startMs, endMs, duration, times, dist, "gps");
+    const path = gpsTrack(lat, lon);
+    return profileFromPoints(
+      num,
+      startMs,
+      endMs,
+      duration,
+      path.map((fix) => fix.t),
+      path.map((fix) => fix.d),
+      "gps",
+      path
+    );
   }
   function profileFromSpeed(num, startMs, endMs, duration, speed, rawIsMs) {
     if (speed.length < 2) return null;
@@ -3034,9 +3081,9 @@ ${cursor}
       let start = gate;
       let outside = false;
       for (let i = gate + 1; i < n; i++) {
-        const step = haversine(lat[i - 1], lon[i - 1], lat[i], lon[i]);
+        const step = haversine2(lat[i - 1], lon[i - 1], lat[i], lon[i]);
         if (step < 80) travel += step;
-        const fromGate = haversine(lat[i], lon[i], lat[gate], lon[gate]);
+        const fromGate = haversine2(lat[i], lon[i], lat[gate], lon[gate]);
         if (travel > 2e3 && fromGate > 25) outside = true;
         if (outside && travel > 2e3 && fromGate < 25 && speed[i] > 40) {
           laps.push({ num: laps.length + 1, startTime: times[start], endTime: times[i] });
@@ -3523,12 +3570,21 @@ File B: ${state.compare.fileName}` : ""}`,
           <div id="table"></div>
         </section>
         <section class="card delta-card">
-          <div class="kicker">Time delta vs distance</div>
-          <p id="delta-legend" class="hint">Positive is behind the reference (lost time). Negative is ahead of the reference (gained time).</p>
-          <div id="delta" class="delta-plot"></div>
+          <div class="review">
+            <div>
+              <div class="kicker">Time delta vs distance</div>
+              <p id="delta-legend" class="hint">Positive is behind the reference (lost time). Negative is ahead of the reference (gained time).</p>
+              <div id="delta" class="delta-plot"></div>
+            </div>
+            <div>
+              <div class="kicker">Track</div>
+              <div id="track" class="track-map"></div>
+              <p id="track-caption" class="hint">Hover a graph or drag the map. The dot is that distance along the lap.</p>
+            </div>
+          </div>
         </section>
-        <p class="hint">${missingCoach.length ? `Coaching overlays look for brake, throttle, and lean. This file has no ${listWords(missingCoach)} channel.` : "Brake, throttle, and lean are the default overlays. \u25B2 brake on, \u25C6 apex."}</p>
-        <p id="readout" class="readout"><span class="hint">Move across a graph. Channel values line up here.</span></p>
+        <p class="hint">${missingCoach.length ? `Coaching overlays look for brake, throttle, and lean. This file has no ${listWords(missingCoach)} channel.` : "Brake, throttle, and lean are the default overlays. \u25B2 brake on, \u25C6 apex. The track dot uses the same cursor."}</p>
+        <p id="readout" class="readout"><span class="hint">Move across a graph. The track dot and channel values follow.</span></p>
         <div id="plots"></div>
       </main>
     </div>
@@ -3683,7 +3739,12 @@ File B: ${state.compare.fileName}` : ""}`,
       render();
     };
     bar.onpointermove = (e) => {
-      if (state.drag == null) return;
+      if (state.drag == null) {
+        const rect = bar.getBoundingClientRect();
+        const fraction = Math.min(1, Math.max(0, (e.clientX - rect.left) / Math.max(rect.width, 1)));
+        seekDistance(fraction);
+        return;
+      }
       state.spans = moveSpanEdge(state.spans, state.drag, fracOf(e));
       const nodes = bar.querySelectorAll(".mark");
       state.spans.slice(0, -1).forEach((span, index) => {
@@ -3761,7 +3822,12 @@ File B: ${state.compare.fileName}` : ""}`,
         const text = Number.isFinite(v) ? v.toFixed(1) : "\u2014";
         draw(p.canvas, p.wrap, p.title, p.unit, p.series, xMax, splitTimes, t, text, p.markers);
       }
+      const fraction = anchor ? fractionAtTime(anchor, t) : null;
+      redrawDelta(fraction);
+      drawTrack(fraction);
+      syncChrome(fraction);
     };
+    onCursor = moveCursor;
     paintDelta(laps);
     for (const ch of shown) {
       const wrap = document.createElement("div");
@@ -3811,6 +3877,11 @@ File B: ${state.compare.fileName}` : ""}`,
         addSplit(fractionAtTime(anchor, t));
         render();
       };
+    }
+    if (state.cursor != null) moveCursor(state.cursor);
+    else {
+      drawTrack(null);
+      syncChrome(null);
     }
     if (rows.length && session.length) {
       const refIdx = referenceIndex(session);
@@ -3990,7 +4061,7 @@ File B: ${state.compare.fileName}` : ""}`,
     ctx.font = "600 12px sans-serif";
     ctx.fillText(unit ? `${title}  \xB7  ${unit}` : title, pad.l, 14);
   }
-  function drawDelta(canvas, wrap, series, metresMax, bands) {
+  function drawDelta(canvas, wrap, series, metresMax, bands, cursorMetres = null) {
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     const width = wrap.clientWidth || 800;
@@ -4096,6 +4167,15 @@ File B: ${state.compare.fileName}` : ""}`,
     }
     ctx.restore();
     ctx.setLineDash([]);
+    if (cursorMetres != null) {
+      const x = xOf(cursorMetres);
+      ctx.strokeStyle = "#ffffff";
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(x, pad.t);
+      ctx.lineTo(x, pad.t + plotH);
+      ctx.stroke();
+    }
     ctx.fillStyle = "#e7ebef";
     ctx.font = "600 12px sans-serif";
     ctx.fillText("Time delta  \xB7  s", pad.l, 14);
@@ -4105,21 +4185,29 @@ File B: ${state.compare.fileName}` : ""}`,
     const end = `${Math.round(metresMax)} m`;
     ctx.fillText(end, width - pad.r - ctx.measureText(end).width, height - 8);
   }
+  var deltaView = null;
+  function redrawDelta(fraction) {
+    if (!deltaView) return;
+    drawDelta(
+      deltaView.canvas,
+      deltaView.host,
+      deltaView.series,
+      deltaView.metresMax,
+      deltaView.bands,
+      fraction == null ? null : fraction * deltaView.metresMax
+    );
+  }
   function paintDelta(drawnLaps) {
     const host = document.getElementById("delta");
-    const legend = document.getElementById("delta-legend");
     if (!host) return;
     const pair = reviewPair();
     if (!pair || !drawnLaps.length) {
+      deltaView = null;
       host.innerHTML = `<p class="hint">Check two laps, or one lap, to plot time gained and lost against the reference.</p>`;
       return;
     }
     const ref = pair.ref;
     const compares = pair.laps;
-    const intro = pair.implicit ? `Reference is ${lapName(ref)}, the best other full lap. ${compares.map(lapName).join(", ")} is the lap being reviewed.` : `Reference is ${lapName(ref)}. Comparing ${compares.map(lapName).join(", ")}.`;
-    if (legend) {
-      legend.textContent = `${intro} Positive is behind the reference (lost time). Negative is ahead of the reference (gained time). Shaded bands are the named corners.`;
-    }
     const canvas = document.createElement("canvas");
     host.replaceChildren(canvas);
     const series = compares.map((lap) => ({
@@ -4129,21 +4217,299 @@ File B: ${state.compare.fileName}` : ""}`,
       points: deltaVsDistance(ref, lap, 280)
     }));
     const bands = state.spans.filter((span) => span.kind === "corner").map((span) => ({ from: span.from * ref.total, to: span.to * ref.total }));
-    drawDelta(canvas, host, series, ref.total, bands);
+    deltaView = { canvas, host, series, metresMax: ref.total, bands };
+    const fraction = cursorFraction();
+    drawDelta(canvas, host, series, ref.total, bands, fraction == null ? null : fraction * ref.total);
     host.onpointermove = (event) => {
       const rect = canvas.getBoundingClientRect();
       const plotW = rect.width - 64;
-      if (plotW <= 0 || !legend) return;
+      if (plotW <= 0) return;
       const x = Math.min(plotW, Math.max(0, event.clientX - rect.left - 52));
-      const metres = x / plotW * ref.total;
-      const fraction = ref.total > 0 ? metres / ref.total : 0;
-      const bits = compares.map((lap) => {
-        const gap = timeAtFraction(lap, fraction) - timeAtFraction(ref, fraction);
-        const word = gap > 5e-4 ? "behind" : gap < -5e-4 ? "ahead" : "level";
-        return `${lapName(lap)} ${formatSigned(gap)} s ${word}`;
-      });
-      legend.textContent = `${Math.round(metres)} m along ${lapName(ref)} \xB7 ${bits.join(" \xB7 ")}. Positive is behind. Negative is ahead.`;
+      seekDistance(plotW > 0 ? x / plotW : 0);
     };
+  }
+  var onCursor = (time) => {
+    state.cursor = time;
+  };
+  function cursorFraction() {
+    if (state.cursor == null) return null;
+    const anchor = anchorLap();
+    if (!anchor) return null;
+    return fractionAtTime(anchor, state.cursor);
+  }
+  function seekDistance(fraction) {
+    const anchor = anchorLap();
+    if (!anchor || !Number.isFinite(fraction)) return;
+    onCursor(timeAtFraction(anchor, Math.min(1, Math.max(0, fraction))));
+  }
+  function mapLaps() {
+    const selected = chosen();
+    const pair = reviewPair();
+    const list = [...selected];
+    if (pair && !list.some((lap) => lap.id === pair.ref.id)) list.unshift(pair.ref);
+    return list;
+  }
+  function trackCaption(fraction) {
+    const drawn = mapLaps().filter((lap) => lap.path.length > 1);
+    if (!drawn.length) return "No GPS latitude/longitude for the laps on the graph, so the map stays empty.";
+    const anchor = anchorLap();
+    if (fraction == null || !anchor) return "Hover a graph, the delta plot, or the split bar. Drag the map to move the cursor.";
+    const ruler = reviewPair()?.ref ?? anchor;
+    const metres = fraction * ruler.total;
+    const span = state.spans.find((item) => fraction >= item.from && fraction <= item.to);
+    const where = span ? sectorLabel(span) : "";
+    return `${Math.round(metres).toLocaleString("en-US")} m along ${lapName(ruler)}${where ? ` \xB7 ${where}` : ""}`;
+  }
+  function syncChrome(fraction) {
+    const legend = document.getElementById("delta-legend");
+    const caption = document.getElementById("track-caption");
+    const pair = reviewPair();
+    if (legend) {
+      if (!pair) {
+        legend.textContent = "Check two laps, or one lap, to plot time gained and lost against the reference.";
+      } else if (fraction == null) {
+        const intro = pair.implicit ? `Reference is ${lapName(pair.ref)}, the best other full lap. ${pair.laps.map(lapName).join(", ")} is the lap being reviewed.` : `Reference is ${lapName(pair.ref)}. Comparing ${pair.laps.map(lapName).join(", ")}.`;
+        legend.textContent = `${intro} Positive is behind the reference (lost time). Negative is ahead of the reference (gained time). Shaded bands are the named corners.`;
+      } else {
+        const metres = fraction * pair.ref.total;
+        const bits = pair.laps.map((lap) => {
+          const gap = timeAtFraction(lap, fraction) - timeAtFraction(pair.ref, fraction);
+          const word = gap > 5e-4 ? "behind" : gap < -5e-4 ? "ahead" : "level";
+          return `${lapName(lap)} ${formatSigned(gap)} s ${word}`;
+        });
+        legend.textContent = `${Math.round(metres)} m along ${lapName(pair.ref)} \xB7 ${bits.join(" \xB7 ")}. Positive is behind. Negative is ahead.`;
+      }
+    }
+    if (caption) caption.textContent = trackCaption(fraction);
+  }
+  var mapFrame = null;
+  function closestFraction(frame, x, y) {
+    let best = 36 * 36;
+    let fraction = null;
+    for (const path of frame.paths) {
+      const total = path.lap.total;
+      if (total <= 0) continue;
+      const pts = path.pts;
+      for (let i = 1; i < pts.length; i++) {
+        const a = pts[i - 1];
+        const b = pts[i];
+        const dx = b.x - a.x;
+        const dy = b.y - a.y;
+        const len2 = dx * dx + dy * dy;
+        let u = len2 > 1e-6 ? ((x - a.x) * dx + (y - a.y) * dy) / len2 : 0;
+        if (u < 0) u = 0;
+        else if (u > 1) u = 1;
+        const px = a.x + u * dx;
+        const py = a.y + u * dy;
+        const dist2 = (px - x) ** 2 + (py - y) ** 2;
+        if (dist2 < best) {
+          best = dist2;
+          fraction = (a.d + u * (b.d - a.d)) / total;
+        }
+      }
+    }
+    return fraction;
+  }
+  function drawDot(ctx, x, y, color, radius) {
+    ctx.beginPath();
+    ctx.fillStyle = "#ffffff";
+    ctx.arc(x, y, radius + 2.2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.beginPath();
+    ctx.fillStyle = color;
+    ctx.arc(x, y, radius, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  function drawTrack(fraction) {
+    const host = document.getElementById("track");
+    if (!host) return;
+    let canvas = host.querySelector("canvas");
+    if (!canvas) {
+      canvas = document.createElement("canvas");
+      host.replaceChildren(canvas);
+      const seek = (event) => {
+        if (!mapFrame || !canvas) return;
+        const rect = canvas.getBoundingClientRect();
+        const hit = closestFraction(mapFrame, event.clientX - rect.left, event.clientY - rect.top);
+        if (hit == null) return;
+        seekDistance(hit);
+      };
+      canvas.onpointerdown = (event) => {
+        canvas.setPointerCapture(event.pointerId);
+        seek(event);
+      };
+      canvas.onpointermove = (event) => {
+        if ((event.buttons & 1) === 0) return;
+        seek(event);
+      };
+    }
+    const ctx = canvas.getContext("2d");
+    if (!ctx) return;
+    const width = host.clientWidth || 320;
+    const height = host.clientHeight || 280;
+    const dpr = Math.min(devicePixelRatio || 1, 2);
+    canvas.width = Math.floor(width * dpr);
+    canvas.height = Math.floor(height * dpr);
+    canvas.style.width = "100%";
+    canvas.style.height = "100%";
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.fillStyle = "#181b1f";
+    ctx.fillRect(0, 0, width, height);
+    const laps = mapLaps().filter((lap) => lap.path.length > 1);
+    if (!laps.length) {
+      mapFrame = null;
+      ctx.fillStyle = "#8e98a3";
+      ctx.font = "13px sans-serif";
+      ctx.fillText("No GPS path for the selected laps.", 16, 28);
+      return;
+    }
+    let latSum = 0;
+    let lonSum = 0;
+    let count = 0;
+    for (const lap of laps) {
+      for (const fix of lap.path) {
+        latSum += fix.lat;
+        lonSum += fix.lon;
+        count += 1;
+      }
+    }
+    const lat0 = latSum / count;
+    const lon0 = lonSum / count;
+    const mLat = 111320;
+    const mLon = 111320 * Math.cos(lat0 * Math.PI / 180);
+    let minX = Infinity;
+    let maxX = -Infinity;
+    let minY = Infinity;
+    let maxY = -Infinity;
+    for (const lap of laps) {
+      for (const fix of lap.path) {
+        const x = (fix.lon - lon0) * mLon;
+        const y = (fix.lat - lat0) * mLat;
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+    const pad = 34;
+    const worldW = Math.max(maxX - minX, 1);
+    const worldH = Math.max(maxY - minY, 1);
+    const plotW = Math.max(1, width - pad * 2);
+    const plotH = Math.max(1, height - pad * 2);
+    const scale = Math.min(plotW / worldW, plotH / worldH);
+    const ox = pad + (plotW - worldW * scale) / 2;
+    const oy = pad + (plotH - worldH * scale) / 2;
+    const screen = (fix) => ({
+      x: ox + ((fix.lon - lon0) * mLon - minX) * scale,
+      y: oy + (maxY - (fix.lat - lat0) * mLat) * scale,
+      d: fix.d
+    });
+    const paths = laps.map((lap) => ({ lap, pts: lap.path.map(screen) }));
+    mapFrame = { paths, width, height };
+    const anchor = anchorLap();
+    const pair = reviewPair();
+    const ordered = [...paths].sort((a, b) => {
+      const rank = (lap) => anchor && lap.id === anchor.id ? 2 : pair && lap.id === pair.ref.id ? 0 : 1;
+      return rank(a.lap) - rank(b.lap);
+    });
+    ctx.lineJoin = "round";
+    ctx.lineCap = "round";
+    for (const path of ordered) {
+      const active = anchor?.id === path.lap.id;
+      const referenceOnly = pair?.ref.id === path.lap.id && !active;
+      ctx.beginPath();
+      ctx.strokeStyle = colorOf(path.lap);
+      ctx.globalAlpha = active ? 1 : 0.82;
+      ctx.lineWidth = active ? 2.8 : 1.8;
+      ctx.setLineDash(path.lap.side === "B" || referenceOnly ? [6, 4] : []);
+      path.pts.forEach((pt, index) => {
+        if (index === 0) ctx.moveTo(pt.x, pt.y);
+        else ctx.lineTo(pt.x, pt.y);
+      });
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+    ctx.globalAlpha = 1;
+    const labelHost = paths.find((path) => path.lap.id === anchor?.id) ?? paths[0];
+    let cx = 0;
+    let cy = 0;
+    for (const pt of labelHost.pts) {
+      cx += pt.x;
+      cy += pt.y;
+    }
+    cx /= labelHost.pts.length;
+    cy /= labelHost.pts.length;
+    const placeLabel = (x, y, text) => {
+      const vx = x - cx;
+      const vy = y - cy;
+      const len = Math.hypot(vx, vy) || 1;
+      const lx = Math.min(width - 16, Math.max(16, x + vx / len * 15));
+      const ly = Math.min(height - 12, Math.max(12, y + vy / len * 15));
+      ctx.font = "600 11px ui-monospace, monospace";
+      ctx.textAlign = "center";
+      ctx.textBaseline = "middle";
+      ctx.lineWidth = 3;
+      ctx.strokeStyle = "#101214";
+      ctx.strokeText(text, lx, ly);
+      ctx.fillStyle = "#f0c14d";
+      ctx.fillText(text, lx, ly);
+    };
+    const start = labelHost.pts[0];
+    if (start) {
+      ctx.fillStyle = "#e7ebef";
+      ctx.fillRect(start.x - 3.5, start.y - 3.5, 7, 7);
+      placeLabel(start.x, start.y, "S/F");
+    }
+    if (state.templateId === "zic") {
+      for (const span of state.spans) {
+        if (span.kind !== "corner") continue;
+        const at = span.apex ?? (span.from + span.to) / 2;
+        const fix = fixAtMetres(labelHost.lap.path, at * labelHost.lap.total);
+        if (!fix) continue;
+        const pt = screen(fix);
+        ctx.fillStyle = "#f0c14d";
+        ctx.beginPath();
+        ctx.arc(pt.x, pt.y, 2.2, 0, Math.PI * 2);
+        ctx.fill();
+        placeLabel(pt.x, pt.y, span.label);
+      }
+    }
+    if (fraction == null) return;
+    const markerAt = (lap) => {
+      const fix = fixAtMetres(lap.path, fraction * lap.total);
+      return fix ? screen(fix) : null;
+    };
+    for (const path of ordered) {
+      if (anchor && path.lap.id === anchor.id) continue;
+      const pt = markerAt(path.lap);
+      if (!pt) continue;
+      ctx.beginPath();
+      ctx.strokeStyle = "#101214";
+      ctx.lineWidth = 4;
+      ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.strokeStyle = colorOf(path.lap);
+      ctx.lineWidth = 2;
+      ctx.arc(pt.x, pt.y, 8, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    if (anchor) {
+      const pt = markerAt(anchor);
+      if (pt) {
+        const aheadFix = fixAtMetres(anchor.path, Math.min(anchor.total, fraction * anchor.total + Math.max(12, anchor.total * 0.012)));
+        if (aheadFix && anchor.path.length) {
+          const tip = screen(aheadFix);
+          ctx.strokeStyle = "#ffffff";
+          ctx.lineWidth = 2;
+          ctx.beginPath();
+          ctx.moveTo(pt.x, pt.y);
+          ctx.lineTo(tip.x, tip.y);
+          ctx.stroke();
+        }
+        drawDot(ctx, pt.x, pt.y, colorOf(anchor), 4.5);
+      }
+    }
   }
   function exportLaps() {
     const pair = reviewPair();
