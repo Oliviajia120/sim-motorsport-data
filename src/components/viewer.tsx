@@ -388,7 +388,7 @@ export function Viewer() {
   }
 
   return (
-    <div className="flex min-h-screen flex-col bg-bg text-fg">
+    <div className="flex h-screen flex-col overflow-hidden bg-bg text-fg">
       <header className="flex flex-wrap items-center gap-3 border-b border-border bg-surface px-4 py-3">
         <div className="mr-2 flex items-center gap-2">
           <Flag className="size-5 text-primary" aria-hidden="true" />
@@ -440,11 +440,11 @@ export function Viewer() {
           </button>
         </main>
       ) : (
-        <div className="flex min-h-0 flex-1 flex-col md:flex-row">
-          <aside className="flex max-h-[40vh] flex-col gap-4 overflow-auto border-b border-border bg-surface p-3 md:max-h-none md:w-72 md:shrink-0 md:border-r md:border-b-0">
-            <section>
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden md:flex-row">
+          <aside className="flex max-h-[48vh] min-h-0 flex-col gap-3 overflow-hidden border-b border-border bg-surface p-3 md:h-full md:max-h-none md:w-72 md:shrink-0 md:border-r md:border-b-0">
+            <section className="flex shrink-0 flex-col">
               <h2 className="mb-2 text-xs font-semibold tracking-wide text-muted uppercase">Channels</h2>
-              <ul className="max-h-52 space-y-1 overflow-auto md:max-h-64">
+              <ul className="max-h-56 space-y-1 overflow-x-hidden overflow-y-auto overscroll-contain rounded-sm border border-border bg-bg">
                 {log.channels.map((ch) => (
                   <li key={ch.key}>
                     <label className="flex min-h-9 items-center gap-2 rounded-sm px-1 text-sm hover:bg-raised">
@@ -463,8 +463,8 @@ export function Viewer() {
                 ))}
               </ul>
             </section>
-            <section>
-              <div className="mb-2 flex items-center justify-between gap-2">
+            <section className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+              <div className="mb-2 flex shrink-0 items-center justify-between gap-2">
                 <h2 className="text-xs font-semibold tracking-wide text-muted uppercase">Laps</h2>
                 <button
                   type="button"
@@ -479,7 +479,7 @@ export function Viewer() {
                   Flying only
                 </button>
               </div>
-              <ul className="space-y-1">
+              <ul className="min-h-0 flex-1 space-y-1 overflow-y-auto overscroll-contain">
                 {log.laps.map((lap, index) => (
                   <li key={lap.num} className="flex items-center gap-2">
                     <label className="flex min-h-9 flex-1 items-center gap-2 text-sm">

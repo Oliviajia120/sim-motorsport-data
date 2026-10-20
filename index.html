@@ -6,23 +6,26 @@
 <title>Sim Motorsport Data</title>
 <style>
 *{box-sizing:border-box}
-html,body{margin:0;background:#101214;color:#e7ebef;font-family:Segoe UI,system-ui,sans-serif;height:100%}
+html,body{margin:0;background:#101214;color:#e7ebef;font-family:Segoe UI,system-ui,sans-serif;height:100%;overflow:hidden}
 button,input,select{font:inherit}
 button{background:#22262c;color:#e7ebef;border:0;border-radius:4px;padding:0.45rem 0.7rem;cursor:pointer}
 button.on,header button,button.go{background:#e85d04;color:#1a0d04;font-weight:650}
 h1{font-size:1.1rem;margin:0}
 h2{font-size:0.72rem;letter-spacing:.06em;text-transform:uppercase;color:#8e98a3;margin:0 0 .4rem}
-.bar{display:flex;gap:.7rem;align-items:center;padding:.7rem 1rem;background:#181b1f;border-bottom:1px solid #323840;flex-wrap:wrap}
+#app{height:100%;min-height:0;display:flex;flex-direction:column}
+.bar{display:flex;gap:.7rem;align-items:center;padding:.7rem 1rem;background:#181b1f;border-bottom:1px solid #323840;flex-wrap:wrap;flex:0 0 auto}
 .meta{color:#8e98a3;font-family:ui-monospace,monospace;font-size:.85rem}
 .empty{max-width:40rem;margin:4rem auto;padding:0 1.2rem}
 .empty h2{font-size:1.7rem;color:#e7ebef;letter-spacing:0;text-transform:none}
-.layout{display:flex;min-height:calc(100vh - 58px)}
-aside{width:280px;background:#181b1f;border-right:1px solid #323840;padding:.8rem;overflow:auto}
+.layout{display:flex;flex:1;min-height:0;overflow:hidden}
+aside{width:280px;background:#181b1f;border-right:1px solid #323840;padding:.8rem;display:grid;grid-template-rows:auto auto minmax(4.5rem,14rem) auto minmax(6.5rem,1fr);align-content:start;min-height:0;overflow:hidden}
 aside input{width:100%;margin:0 0 .45rem;background:#101214;color:#e7ebef;border:1px solid #323840;border-radius:4px;padding:.35rem .45rem}
-main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0}
-.list label{display:grid;grid-template-columns:1rem minmax(0,1fr);align-items:center;column-gap:.5rem;min-height:1.6rem;font-size:.84rem;padding:0}
+main{flex:1;padding:.8rem .8rem 6.5rem;overflow:auto;min-width:0;min-height:0}
+.list{min-height:0;max-height:14rem;margin:0 0 .7rem;overflow-x:hidden;overflow-y:auto;overscroll-behavior:contain;border:1px solid #323840;border-radius:4px;background:#101214}
+.list label{display:grid;grid-template-columns:1rem minmax(0,1fr);align-items:center;column-gap:.5rem;min-height:1.6rem;font-size:.84rem;padding:0 .35rem}
 .list label span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .list input{margin:0;width:1rem;height:1rem;justify-self:center}
+#laps{min-height:0;overflow-y:auto;overscroll-behavior:contain}
 .laprow label{display:flex;gap:.45rem;align-items:center;font-size:.9rem;padding:.2rem 0}
 .laprow{display:flex;align-items:center;justify-content:space-between;gap:.4rem}
 .laprow i{width:.65rem;height:.65rem;border-radius:99px;display:inline-block}
@@ -73,7 +76,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
 .grok-log p{margin:.35rem 0;white-space:pre-wrap}
 .grok-log .me{color:#f0c14d}
 .grok-panel a{color:#e85d04}
-@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:40vh}}
+@media(max-width:800px){.layout{flex-direction:column}aside{width:auto;max-height:48vh;grid-template-rows:auto auto minmax(3.2rem,16vh) auto minmax(6.5rem,1fr)}.list{max-height:16vh}}
 </style>
 </head>
 <body>
