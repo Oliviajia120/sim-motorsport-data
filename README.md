@@ -17,6 +17,12 @@ Speed is shown in km/h. Splits follow GPS distance, so a sector is the same piec
 
 Manual percentage splits are still there. **Divide lap**, **Clear**, and **Apply → Manual splits** use that mode. **Save template** keeps the current corners under a name in this browser.
 
+## On Railway
+
+Link this GitHub repo with **Deploy from GitHub**. After it is linked, every push to `main` deploys on its own. Open the public `https://` address Railway shows for the service. That page is this `index.html`.
+
+`.xrk` and `.vbo` files stay on your computer. **Open file** reads them in the browser. They are not uploaded to Railway.
+
 ## Edit later
 
 `src/standalone.ts` is the source of `index.html`. `src/lib/telemetry.ts` is the sector maths, including the ZIC corner distances. `src/components/viewer.tsx` and `src/components/trace-plot.tsx` are the same coaching desk in component form.
