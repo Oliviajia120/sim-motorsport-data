@@ -122,6 +122,65 @@ function haversine(lat1: number, lon1: number, lat2: number, lon2: number): numb
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
 }
 
+/** One accepted GPS sample. `d` is metres along the lap from the first fix. */
+export type GpsFix = { t: number; lat: number; lon: number; d: number };
+
+/**
+ * Pair latitude and longitude by sample index.
+ * Drops null-island and out-of-range fixes, and any step longer than 80 m, matching lap distance.
+ */
+export function gpsTrack(lat: Sample[], lon: Sample[]): GpsFix[] {
+  const n = Math.min(lat.length, lon.length);
+  const track: GpsFix[] = [];
+  let acc = 0;
+  let prevLat = 0;
+  let prevLon = 0;
+  let hasPrev = false;
+  for (let i = 0; i < n; i++) {
+    const la = lat[i]!.v;
+    const lo = lon[i]!.v;
+    if (Math.abs(la) > 90 || Math.abs(lo) > 180) continue;
+    if (Math.abs(la) < 0.01 && Math.abs(lo) < 0.01) continue;
+    const t = lat[i]!.t;
+    if (hasPrev) {
+      const step = haversine(prevLat, prevLon, la, lo);
+      if (step > 80) continue;
+      acc += step;
+    }
+    track.push({ t, lat: la, lon: lo, d: acc });
+    prevLat = la;
+    prevLon = lo;
+    hasPrev = true;
+  }
+  return track;
+}
+
+/** GPS position at `metres` along `track`. Latitude and longitude are interpolated. */
+export function fixAtMetres(track: readonly GpsFix[], metres: number): GpsFix | null {
+  if (!track.length) return null;
+  const first = track[0]!;
+  const last = track[track.length - 1]!;
+  if (metres <= first.d) return { ...first };
+  if (metres >= last.d) return { ...last };
+  let lo = 0;
+  let hi = track.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (track[mid]!.d < metres) lo = mid + 1;
+    else hi = mid;
+  }
+  const b = track[lo]!;
+  const a = track[Math.max(0, lo - 1)]!;
+  const span = b.d - a.d;
+  const u = span > 1e-6 ? (metres - a.d) / span : 0;
+  return {
+    t: a.t + u * (b.t - a.t),
+    lat: a.lat + u * (b.lat - a.lat),
+    lon: a.lon + u * (b.lon - a.lon),
+    d: metres,
+  };
+}
+
 function profileFromPoints(
   lapNum: number,
   startMs: number,
@@ -153,31 +212,16 @@ function profileFromGps(
   lat: Sample[],
   lon: Sample[],
 ): LapProfile | null {
-  const n = Math.min(lat.length, lon.length);
-  const times: number[] = [];
-  const dist: number[] = [];
-  let acc = 0;
-  let prevLat = 0;
-  let prevLon = 0;
-  let hasPrev = false;
-  for (let i = 0; i < n; i++) {
-    const la = lat[i]!.v;
-    const lo = lon[i]!.v;
-    if (Math.abs(la) > 90 || Math.abs(lo) > 180) continue;
-    if (Math.abs(la) < 0.01 && Math.abs(lo) < 0.01) continue;
-    const t = lat[i]!.t;
-    if (hasPrev) {
-      const step = haversine(prevLat, prevLon, la, lo);
-      if (step > 80) continue;
-      acc += step;
-    }
-    times.push(t);
-    dist.push(acc);
-    prevLat = la;
-    prevLon = lo;
-    hasPrev = true;
-  }
-  return profileFromPoints(lapNum, startMs, endMs, duration, times, dist, "gps");
+  const track = gpsTrack(lat, lon);
+  return profileFromPoints(
+    lapNum,
+    startMs,
+    endMs,
+    duration,
+    track.map((fix) => fix.t),
+    track.map((fix) => fix.d),
+    "gps",
+  );
 }
 
 function profileFromSpeed(
