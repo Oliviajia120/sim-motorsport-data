@@ -1,4 +1,5 @@
 import { parseXrk, type XrkChannel, type XrkLog } from "aim-xrk";
+import { parseDat } from "./lib/i2m-dat";
 import { parseSa } from "./lib/speedangle";
 import { downloadCoachingNote, safeStem, type CoachingNote, type NoteChart } from "./lib/coaching-note";
 import {
@@ -798,7 +799,7 @@ function render() {
   if (!log) {
     app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open file</button></header>
       <main class="empty"><h2>A coach desk for the lap</h2>
-      <p>Open an AIM .xrk, a Dragy .vbo, or a SpeedAngle .sa. Apply the ZIC C1–C11 template, or drop your own splits. The ideal time is the sum of the fastest pass through each sector.</p>
+      <p>Open an AIM .xrk, a Dragy .vbo, a SpeedAngle .sa, or an I2M Chrome / DataLog .dat. Apply the ZIC C1–C11 template, or drop your own splits. The ideal time is the sum of the fastest pass through each sector.</p>
       <button id="open2">Choose a file</button></main>`;
     document.getElementById("open")!.onclick = pick;
     document.getElementById("open2")!.onclick = pick;
@@ -2079,7 +2080,7 @@ function colorOf(lap: LapProfile) {
 
 const picker = document.createElement("input");
 picker.type = "file";
-picker.accept = ".xrk,.xrz,.vbo,.sa";
+picker.accept = ".xrk,.xrz,.vbo,.sa,.dat";
 picker.style.display = "none";
 document.body.appendChild(picker);
 let pickTarget: "A" | "B" = "A";
@@ -2096,7 +2097,9 @@ picker.onchange = async () => {
       ? parseVbo(new TextDecoder().decode(buf), file.name)
       : lower.endsWith(".sa")
         ? parseSa(new TextDecoder().decode(buf), file.name)
-        : parseXrk(new Uint8Array(buf));
+        : lower.endsWith(".dat")
+          ? parseDat(new TextDecoder().decode(buf), file.name)
+          : parseXrk(new Uint8Array(buf));
     const prepared = prepare(parsed, file.name, target);
     if (!prepared.laps.length) {
       alert("No laps with a usable distance trace were found.");
