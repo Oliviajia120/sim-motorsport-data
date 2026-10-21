@@ -1942,6 +1942,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
   // src/lib/speedangle.ts
   var SAMPLE_MS = 100;
   var MPH_TO_KMH = 1.609344;
+  var G_COUNTS_PER_G = 50;
   function makeChannel(name, units, timecodes, values) {
     return {
       name,
@@ -2029,17 +2030,14 @@ td .d{display:block;font-size:.72rem;font-weight:650}
     return "";
   }
   function headerSpeedUnit(preamble) {
-    for (const raw of preamble.split(/\r?\n/)) {
+    const source = preamble.replace(/<timer\b[^>]*>[\s\S]*?<\/timer>/gi, "");
+    for (const raw of source.split(/\r?\n/)) {
       const line = raw.trim().replace(/^#/, "").trim();
       const match = line.match(/^(?:speed[\s_-]*)?unit\s*[:=]\s*([a-z0-9/]+)/i);
       if (!match) continue;
       if (/mph/i.test(match[1])) return "mph";
       if (/km|kph/i.test(match[1])) return "kmh";
     }
-    const mph = /\bmph\b/i.test(preamble);
-    const kmh = /\b(?:km\/h|kmh|kph)\b/i.test(preamble);
-    if (mph && !kmh) return "mph";
-    if (kmh && !mph) return "kmh";
     return null;
   }
   function haversineMeters(lat1, lon1, lat2, lon2) {
@@ -2158,7 +2156,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
     add(
       "Longitudinal G",
       "G",
-      rows.map((row) => row.longG)
+      rows.map((row) => row.longG / G_COUNTS_PER_G)
     );
     add(
       "GPS Latitude",
@@ -2178,7 +2176,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
     add(
       "G 2",
       "G",
-      rows.map((row) => row.g2)
+      rows.map((row) => row.g2 / G_COUNTS_PER_G)
     );
     add(
       "Max Angle Previous Turn",

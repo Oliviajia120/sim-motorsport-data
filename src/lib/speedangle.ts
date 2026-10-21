@@ -10,16 +10,22 @@ import type { XrkChannel, XrkLap, XrkLog } from "aim-xrk";
  *
  * Those indexes match the public converter at
  * github.com/torqu3e/speedangle-to-racechrono, which was written against
- * real logs. No public `.sa` bytes were still available to check here
- * (a posted Drive sample returned 404), so the unit fixture is synthetic.
+ * real logs. A ZIC R4 export checked here agrees: trace speed matches GPS
+ * ground speed as miles per hour (and the timer's top speed, which is
+ * already km/h). Both G columns are integer counts of 0.02 G. The ±1.5 G
+ * sensor range is ±75 counts, and the speed change on that log matches ÷50
+ * once the accelerometer's short lead over GPS speed is allowed for.
  *
- * Speed is stored in the R4's unit (KMH or MPH). An explicit unit in the
- * header wins. Otherwise a moving GPS trace is compared with the logged
- * speed. Anything left over is kept as km/h, which is what this viewer shows.
+ * `<timer #unit=KM/h>` is the unit of the timer summary only. An explicit
+ * unit field (`Unit: MPH`, `#UNIT=KMH`) still wins for the trace. Otherwise
+ * a moving GPS trace is compared with the logged speed. Anything left over
+ * is kept as km/h, which is what this viewer shows.
  */
 
 const SAMPLE_MS = 100;
 const MPH_TO_KMH = 1.609344;
+/** R4 longitudinal G is stored as counts of 0.02 G. */
+const G_COUNTS_PER_G = 50;
 
 type Trace = {
   lat: number;
@@ -127,17 +133,16 @@ function field(preamble: string, keys: readonly string[]): string {
 }
 
 function headerSpeedUnit(preamble: string): "mph" | "kmh" | null {
-  for (const raw of preamble.split(/\r?\n/)) {
+  // Drop the timer block first. Its `#unit=` attribute is the summary
+  // display unit (average and top speed are already in that unit).
+  const source = preamble.replace(/<timer\b[^>]*>[\s\S]*?<\/timer>/gi, "");
+  for (const raw of source.split(/\r?\n/)) {
     const line = raw.trim().replace(/^#/, "").trim();
     const match = line.match(/^(?:speed[\s_-]*)?unit\s*[:=]\s*([a-z0-9/]+)/i);
     if (!match) continue;
     if (/mph/i.test(match[1]!)) return "mph";
     if (/km|kph/i.test(match[1]!)) return "kmh";
   }
-  const mph = /\bmph\b/i.test(preamble);
-  const kmh = /\b(?:km\/h|kmh|kph)\b/i.test(preamble);
-  if (mph && !kmh) return "mph";
-  if (kmh && !mph) return "kmh";
   return null;
 }
 
@@ -271,7 +276,7 @@ export function parseSa(text: string, fileName: string): XrkLog {
   add(
     "Longitudinal G",
     "G",
-    rows.map((row) => row.longG),
+    rows.map((row) => row.longG / G_COUNTS_PER_G),
   );
   add(
     "GPS Latitude",
@@ -291,7 +296,7 @@ export function parseSa(text: string, fileName: string): XrkLog {
   add(
     "G 2",
     "G",
-    rows.map((row) => row.g2),
+    rows.map((row) => row.g2 / G_COUNTS_PER_G),
   );
   add(
     "Max Angle Previous Turn",
