@@ -15,7 +15,7 @@ Download `index.html` from this repo. Double-click the saved file. It opens in C
 
 Speed is shown in km/h. Splits follow GPS distance, so a sector is the same piece of track on every lap. The ideal time is the sum of the fastest sector times, including the straights between named corners.
 
-A SpeedAngle `.sa` splits laps on finish-line marks. GPS speed, lean angle, and longitudinal G come up on open. Longitudinal G is the brake and accel trace when the log has no brake pressure: negative G is braking. If the file says MPH, or the GPS trace shows the speed column is miles per hour, those numbers are converted to km/h. A track or file name that says Zhuhai or ZIC applies C1–C11 on open.
+A SpeedAngle `.sa` splits laps on finish-line marks. GPS speed, lean angle, and longitudinal G come up on open. Longitudinal G is the brake and accel trace when the log has no brake pressure: negative G is braking. The trace speed column is miles per hour when the GPS trace agrees, and those numbers are converted to km/h. A unit field on its own header line (`Unit: KMH` or `Unit: MPH`) wins over that. Longitudinal G is stored in steps of 0.02 G. A track or file name that says Zhuhai or ZIC applies C1–C11 on open.
 
 Manual percentage splits are still there. **Divide lap**, **Clear**, and **Apply → Manual splits** use that mode. **Save template** keeps the current corners under a name in this browser.
 

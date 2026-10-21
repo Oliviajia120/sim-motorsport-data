@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import {
   ZIC_TEMPLATE,
   coachingChannelKeys,
@@ -18,13 +19,14 @@ const MPH_KMH = 1.609344;
  * Columns follow the R4 manual and the public racechrono converter:
  * lat, lon, lean (+right/−left), angle, long G (+accel/−brake), G, speed,
  * previous-turn angle (−255 filler), satellites, validity, F/sector/0.
+ * Both G columns are counts of 0.02 G, same as an R4 export.
  */
 
 const LAT0 = 22.367;
 const LON0 = 113.591;
 
 function row(lat: number, lon: number, lean: number, longG: number, speed: number, prev: number, mark: string): string {
-  return `${lat.toFixed(6)},${lon.toFixed(6)},${lean},0,${longG},0,${speed},${prev},12,1,${mark}`;
+  return `${lat.toFixed(6)},${lon.toFixed(6)},${lean},0,${longG},${longG},${speed},${prev},12,1,${mark}`;
 }
 
 function movingFixture(): { text: string; start1: number } {
@@ -63,7 +65,7 @@ function movingFixture(): { text: string; start1: number } {
     const braking = along >= 40 && along <= 80;
     const corner = along >= 40 && along <= 100;
     const speed = corner ? 70 + Math.abs(along - 70) * 2 : 160;
-    return { lean: 35, g: braking ? -1 : along > 80 && along < 100 ? 1 : 0, speed, prev: -255, mark: along === 50 ? "1" : "0" };
+    return { lean: 35, g: braking ? -50 : along > 80 && along < 100 ? 50 : 0, speed, prev: -255, mark: along === 50 ? "1" : "0" };
   });
   push(1, () => ({ lean: 35, g: 0, speed: 160, prev: -255, mark: "F" }));
   push(lap2 - 1, () => ({ lean: -28, g: 0, speed: 150, prev: -255, mark: "0" }));
@@ -95,6 +97,8 @@ assert.equal(lean.values[built.start1], 35);
 assert.equal(lean.values[parsed.laps[1]!.startTime / 100 + 5], -28);
 assert.equal(longG.values[built.start1 + 40], -1);
 assert.equal(longG.units, "G");
+assert.equal(parsed.channels["G 2"]!.values[built.start1 + 40], -1);
+assert.equal(parsed.channels["G 2"]!.units, "G");
 assert.ok(Number.isNaN(parsed.channels["Max Angle Previous Turn"]!.values[0]));
 assert.equal(parsed.channels["Max Angle Previous Turn"]!.values[built.start1], 42);
 assert.equal(speed.timecodes[1]! - speed.timecodes[0]!, 100);
@@ -182,6 +186,21 @@ const headerMph = parseSa(flat("#UNIT=MPH", 90, 1), "plain.sa");
 assert.equal(headerMph.metadata["Speed Unit"], "mph converted to km/h");
 assert.ok(Math.abs((headerMph.channels["GPS Speed"]!.values[3] as number) - 90 * MPH_KMH) < 0.01);
 
+// The timer tag is the summary unit. It must not freeze the trace as km/h.
+const timerTagMph = parseSa(
+  flat("<timer #unit=KM/h>\n148,267,0,0,51,-72\n</timer>", 100, (100 * MPH_KMH) / 3.6 * 0.1),
+  "timer-tag.sa",
+);
+assert.equal(timerTagMph.metadata["Speed Unit"], "mph converted to km/h");
+assert.ok(Math.abs((timerTagMph.channels["GPS Speed"]!.values[10] as number) - 100 * MPH_KMH) < 0.01);
+
+const timerTagKmh = parseSa(
+  flat("<timer #unit=KM/h>\n</timer>", 100, (100 / 3.6) * 0.1),
+  "timer-tag-kmh.sa",
+);
+assert.equal(timerTagKmh.metadata["Speed Unit"], "km/h");
+assert.equal(timerTagKmh.channels["GPS Speed"]!.values[10], 100);
+
 const named = parseSa(flat("#UNIT=KMH", 80, 2), "RIDER 032519 123013.sa");
 assert.equal(named.metadata["Log Date"], "2019-03-25");
 assert.equal(named.metadata["Log Time"], "12:30:13");
@@ -195,5 +214,34 @@ assert.equal(noFinish.metadata["Venue"], "MISANO");
 assert.equal(prepareLog(noFinish, "open.sa").laps.length, 1);
 
 assert.throws(() => parseSa("# only a header\nno,trace\n", "empty.sa"), /no usable trace/);
+
+// Trimmed from the real ZIC 080626 164027 R4 log. The kept rows include the
+// sample 5.4 s after the start of the 102.5 s lap: raw speed 153, raw long G −69.
+const zicText = readFileSync(new URL("./fixtures/zic-080626-r4.sa", import.meta.url), "utf8");
+const zic = parseSa(zicText, "ZIC 080626 164027.sa");
+assert.equal(zic.metadata["Speed Unit"], "mph converted to km/h");
+assert.match(zicText, /<timer #unit=KM\/h>/);
+const zicLat = zic.channels["GPS Latitude"]!;
+const zicLon = zic.channels["GPS Longitude"]!;
+const zicHits: number[] = [];
+for (let i = 0; i < zicLat.values.length; i++) {
+  if (Math.abs((zicLat.values[i] as number) - 22.365419) < 1e-6 && Math.abs((zicLon.values[i] as number) - 113.560616) < 1e-6) {
+    zicHits.push(i);
+  }
+}
+assert.equal(zicHits.length, 1);
+const at = zicHits[0]!;
+assert.ok(Math.abs((zic.channels["GPS Speed"]!.values[at] as number) - 153 * MPH_KMH) < 1e-6, `speed ${zic.channels["GPS Speed"]!.values[at]}`);
+assert.ok(Math.abs((zic.channels["Longitudinal G"]!.values[at] as number) - -1.38) < 1e-9);
+assert.ok(Math.abs((zic.channels["G 2"]!.values[at] as number) - -1.38) < 1e-9);
+assert.equal(zic.channels["GPS Speed"]!.units, "km/h");
+assert.equal(zic.channels["Longitudinal G"]!.units, "G");
+let peakG = 0;
+let peakSpeed = 0;
+for (const value of zic.channels["Longitudinal G"]!.values) peakG = Math.max(peakG, Math.abs(value as number));
+for (const value of zic.channels["GPS Speed"]!.values) peakSpeed = Math.max(peakSpeed, value as number);
+assert.ok(peakG > 1 && peakG < 2, `long G peak ${peakG}`);
+assert.ok(Math.abs(peakSpeed - 166 * MPH_KMH) < 1e-6, `speed peak ${peakSpeed}`);
+assert.equal(zic.channels["Lean Angle"]!.values[at], 0);
 
 console.log("speedangle parser ok");
