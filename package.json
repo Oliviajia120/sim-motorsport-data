@@ -5,7 +5,7 @@
   "scripts": {
     "build": "node build.mjs",
     "start": "node server.mjs",
-    "test": "node --experimental-strip-types src/lib/coaching.test.ts"
+    "test": "node --experimental-strip-types src/lib/coaching.test.ts && node --experimental-strip-types src/lib/speedangle.test.ts"
   },
   "devDependencies": {
     "aim-xrk": "0.1.1",

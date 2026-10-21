@@ -75,6 +75,7 @@ function isSpeedName(name: string): boolean {
 
 export function displayScale(ch: XrkChannel): { unit: string; scale: number } {
   if (!isSpeedName(ch.name)) return { unit: ch.units || "", scale: 1 };
+  if (/km\/h|kmh/i.test(ch.units || "")) return { unit: "km/h", scale: 1 };
   const max = channelMax(ch);
   if (max > 0 && max < 130) return { unit: "km/h", scale: 3.6 };
   return { unit: ch.units || "km/h", scale: 1 };
@@ -109,6 +110,28 @@ function findChannel(
   test: (ch: XrkChannel) => boolean,
 ): XrkChannel | undefined {
   return Object.values(channels).find(test);
+}
+
+function isGpsPositionName(name: string): boolean {
+  return !/acc|accel|brake|\bg\b|speed|angle|lean|rpm/i.test(name);
+}
+
+/** Latitude channel. Exact GPS name wins, so a "Longitudinal G" channel is not longitude. */
+export function findLatChannel(channels: Iterable<XrkChannel>): XrkChannel | undefined {
+  const list = [...channels];
+  return (
+    list.find((ch) => ch.name === "GPS Latitude") ??
+    list.find((ch) => isGpsPositionName(ch.name) && /lat/i.test(ch.name) && !/lateral/i.test(ch.name))
+  );
+}
+
+/** Longitude channel. Exact GPS name wins over other "long…" names such as longitudinal G. */
+export function findLonChannel(channels: Iterable<XrkChannel>): XrkChannel | undefined {
+  const list = [...channels];
+  return (
+    list.find((ch) => ch.name === "GPS Longitude") ??
+    list.find((ch) => isGpsPositionName(ch.name) && (/lon/i.test(ch.name) || /long/i.test(ch.name)))
+  );
 }
 
 function haversine(lat1: number, lon1: number, lat2: number, lon2: number): number {
@@ -263,16 +286,8 @@ export function prepareLog(log: XrkLog, fileName: string): PreparedLog {
     })
     .sort((a, b) => a.label.localeCompare(b.label));
 
-  const lat = findChannel(
-    log.channels,
-    (ch) => ch.name === "GPS Latitude" || (/lat/i.test(ch.name) && !/acc|lateral/i.test(ch.name)),
-  );
-  const lon = findChannel(
-    log.channels,
-    (ch) =>
-      ch.name === "GPS Longitude" ||
-      ((/lon/i.test(ch.name) || /long/i.test(ch.name)) && !/acc/i.test(ch.name)),
-  );
+  const lat = findLatChannel(Object.values(log.channels));
+  const lon = findLonChannel(Object.values(log.channels));
   const speed = findChannel(log.channels, (ch) => isSpeedName(ch.name));
   const speedIsMs = speed ? displayScale(speed).scale === 3.6 : true;
 
@@ -314,12 +329,14 @@ export function prepareLog(log: XrkLog, fileName: string): PreparedLog {
   const rider = String(meta.Driver ?? "").trim() || "—";
   const when = [meta["Log Date"], meta["Log Time"]].map((item) => String(item ?? "").trim()).filter(Boolean).join(" ");
   const track = String(meta.Venue ?? meta.Track ?? meta.track ?? "Session");
+  const speedUnit = String(meta["Speed Unit"] ?? "").trim();
+  const converted = /converted/i.test(speedUnit) ? ` Logged speed was ${speedUnit}.` : "";
   const distanceNote =
-    usedGps > 0
+    (usedGps > 0
       ? "Splits follow GPS distance along the lap, so a sector is the same piece of track on every lap."
       : usedSpeed > 0
         ? "No usable latitude/longitude. Splits follow distance integrated from speed."
-        : "This file has no GPS position or speed, so sectors cannot be placed.";
+        : "This file has no GPS position or speed, so sectors cannot be placed.") + converted;
 
   return { fileName, vehicle, rider, when, track, channels, laps, distanceNote };
 }
@@ -820,7 +837,9 @@ export function coachingChannelKeys(channels: readonly { key: string; label: str
       /front[\s_-]*brake|brake[\s_-]*front/i,
       /brake[\s_-]*(press|pressure)/i,
       /\bbrake\b/i,
-    ]) ?? firstChannel(channels, [/brake/i]);
+    ]) ??
+    firstChannel(channels, [/brake/i]) ??
+    firstChannel(channels, [/long(?:itudinal)?[\s_-]*g\b/i, /long[\s_-]*accel/i]);
   const throttle = firstChannel(channels, [/twist[\s_-]*grip/i, /throttle/i, /\btps\b/i]);
   const lean = firstChannel(channels, [/lean[\s_-]*angle/i, /bike[\s_-]*angle/i, /\blean\b/i, /roll[\s_-]*angle/i]);
   const speed =
@@ -869,9 +888,25 @@ function brakeThreshold(unit: string, peak: number): number | null {
   return peak * 0.15;
 }
 
+/** Longitudinal G is +accel / −brake. Brake-on is the drop through a negative threshold. */
+function longGBrakeOnset(window: Sample[]): number | null {
+  let peak = 0;
+  for (const sample of window) if (sample.v < peak) peak = sample.v;
+  if (peak > -0.2) return null;
+  const threshold = peak < -5 ? peak * 0.12 : Math.min(-0.15, peak * 0.25);
+  for (let i = 1; i < window.length; i++) {
+    const prev = window[i - 1]!;
+    const curr = window[i]!;
+    if (prev.v > threshold && curr.v <= threshold) return curr.t;
+  }
+  if (window[0]!.v <= threshold) return window[0]!.t;
+  return null;
+}
+
 function brakeOnset(samples: Sample[], t0: number, t1: number, unit: string): number | null {
   const window = samplesBetween(samples, t0, t1);
   if (window.length < 4 || !(t1 > t0)) return null;
+  if (/^g$/i.test(unit.trim())) return longGBrakeOnset(window);
   let peak = 0;
   for (const sample of window) if (sample.v > peak) peak = sample.v;
   const threshold = brakeThreshold(unit, peak);
