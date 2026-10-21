@@ -82,11 +82,13 @@ const sentinels = parseDat(
     "$GPS,10,A,1000.0100,N,01000.0000,E,20,100000.100,5",
     "$VALUE,0,0,0,1000,65535,4000,0,0,200",
     "$VALUE,5,0,0,1000,1800,4000,0,0,0",
+    "$VALUE,10,0,0,1000,2000,4000,0,0,0",
   ].join("\n"),
   "sentinel.dat",
 );
-assert.equal(sentinels.channels["Rear Speed"]!.values.length, 1);
+assert.equal(sentinels.channels["Rear Speed"]!.values.length, 2);
 assert.ok(Math.abs(sentinels.channels["Rear Speed"]!.values[0]! - 1.95 * (39062.5 / 1800) * 3.6) < 1e-6);
+assert.ok(Math.abs(sentinels.channels["Rear Speed"]!.values[1]! - 1.95 * (39062.5 / 2000) * 3.6) < 1e-6);
 assert.ok(Math.abs(sentinels.channels["APS Throttle"]!.values[0]! - (200 / 1023) * 512) < 1e-9);
 
 function outAndBack(): string {
@@ -147,7 +149,9 @@ function arc(): string {
     const lonAbs = Math.abs(lon * 60);
     const latTok = `${String(Math.floor(latAbs / 60)).padStart(2, "0")}${(latAbs % 60).toFixed(4)}`;
     const lonTok = `${String(Math.floor(lonAbs / 60)).padStart(3, "0")}${(lonAbs % 60).toFixed(4)}`;
-    lines.push(`$GPS,${i * 10},A,${latTok},N,${lonTok},E,43.2,120000.000,0`);
+    const latHemi = lat >= 0 ? "N" : "S";
+    const lonHemi = lon >= 0 ? "E" : "W";
+    lines.push(`$GPS,${i * 10},A,${latTok},${latHemi},${lonTok},${lonHemi},43.2,120000.000,0`);
   }
   return lines.join("\n");
 }

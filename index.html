@@ -877,8 +877,8 @@ td .d{display:block;font-size:.72rem;font-weight:650}
           SNz[i] = nz;
         }
         const denom = nx * Dx[i] + ny * Dy[i] + nz * Dz[i];
-        const num = -(nx * Ox[i] + ny * Oy[i] + nz * Oz[i]);
-        t[i] = Math.max(num / denom, 0);
+        const num2 = -(nx * Ox[i] + ny * Oy[i] + nz * Oz[i]);
+        t[i] = Math.max(num2 / denom, 0);
         const px = Ox[i] + t[i] * Dx[i];
         const py = Oy[i] + t[i] * Dy[i];
         const pz = Oz[i] + t[i] * Dz[i];
@@ -1102,8 +1102,8 @@ td .d{display:block;font-size:.72rem;font-weight:650}
       for (let i = 0; i < lapNums.length; i++)
         lapNums[i] -= minLap;
     }
-    const laps = lapNums.map((num, i) => ({
-      num,
+    const laps = lapNums.map((num2, i) => ({
+      num: num2,
       startTime: Math.trunc(startTimes[i]),
       endTime: Math.trunc(endTimes[i])
     }));
@@ -1939,11 +1939,481 @@ td .d{display:block;font-size:.72rem;font-weight:650}
     return { channels, laps, metadata };
   }
 
+  // src/lib/i2m-dat.ts
+  var INDEX_MS = 10;
+  var KNOTS_TO_KMH = 1.852;
+  var SPEED_CLOCK_HZ = 39062.5;
+  var ADC_FULL_SCALE = 1023;
+  var NO_PULSE = 65535;
+  var G = 9.80665;
+  var ANALOG_AT = [7, 8, 9, 10, 11, 12, 0, 1];
+  var PINION_AT = 2;
+  var REAR_AT = 3;
+  var RPM_AT = 4;
+  var EXTRA_AT = [15, 16, 17, 18, 19];
+  var ZIC_SF = { lat: 22.3671, lon: 113.5601 };
+  var ZIC_CENTER = { lat: 22.367194, lon: 113.55639 };
+  var EMPTY = "This I2M file has no usable GPS trace. A Chrome / DataLog .dat is text: $NEW SESSION, $DATE, $PILOTA, $SETTINGS, then $GPS and $VALUE rows.";
+  function makeChannel(name, units, timecodes, values) {
+    return {
+      name,
+      shortName: name,
+      units,
+      decPts: 3,
+      interpolate: true,
+      func: name,
+      sourceType: 0,
+      sourceChannelId: 0,
+      deviceTag: "i2m",
+      calValue1: 0,
+      calValue2: 0,
+      displayRangeMin: 0,
+      displayRangeMax: 0,
+      timecodes,
+      values
+    };
+  }
+  function haversine(lat1, lon1, lat2, lon2) {
+    const R = 6371e3;
+    const toR = Math.PI / 180;
+    const dLat = (lat2 - lat1) * toR;
+    const dLon = (lon2 - lon1) * toR;
+    const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
+    return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
+  }
+  function nmea(dm, hemi) {
+    const v = Number(dm);
+    if (!Number.isFinite(v)) return NaN;
+    const deg = Math.floor(Math.abs(v) / 100);
+    const min = Math.abs(v) - deg * 100;
+    if (min >= 60) return NaN;
+    let dec = deg + min / 60;
+    if (hemi === "S" || hemi === "W") dec = -dec;
+    return dec;
+  }
+  function num(token) {
+    if (token == null || token.trim() === "") return NaN;
+    const v = Number(token);
+    return Number.isFinite(v) ? v : NaN;
+  }
+  function isNum(token) {
+    return /^[+-]?(?:\d+\.?\d*|\.\d+)$/.test(token.trim());
+  }
+  function parseDate(token) {
+    const digits = token.replace(/\D/g, "");
+    if (digits.length < 6) return "";
+    const day = Number(digits.slice(0, 2));
+    const month = Number(digits.slice(2, 4));
+    const year = Number(digits.slice(4, 6));
+    if (day < 1 || day > 31 || month < 1 || month > 12) return "";
+    return `20${String(year).padStart(2, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+  }
+  function parseTod(token) {
+    const v = Number(token);
+    if (!Number.isFinite(v)) return "";
+    const whole = Math.floor(v);
+    const h = Math.floor(whole / 1e4);
+    const m = Math.floor(whole % 1e4 / 100);
+    const s = whole % 100;
+    if (h > 23 || m > 59 || s > 59) return "";
+    return `${String(h).padStart(2, "0")}:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  }
+  function parseSettings(line) {
+    const tokens = line.split(",").slice(1).map((token) => token.trim());
+    const channels = [];
+    let bike = null;
+    let i = 0;
+    while (i < tokens.length) {
+      const token = tokens[i] ?? "";
+      if (!token) {
+        i += 1;
+        continue;
+      }
+      if (isNum(token)) {
+        const nums = [];
+        while (i < tokens.length && isNum(tokens[i] ?? "") && nums.length < 13) {
+          nums.push(Number(tokens[i]));
+          i += 1;
+        }
+        if (nums.length === 13 && !bike) {
+          bike = {
+            rearMm: nums[0],
+            pinion: nums[1],
+            crown: nums[2],
+            frontMm: nums[3],
+            pulses1: nums[4],
+            pulses2: nums[5]
+          };
+        }
+        continue;
+      }
+      const min = num(tokens[i + 1]);
+      const max = num(tokens[i + 2]);
+      if (Number.isFinite(min) && Number.isFinite(max)) {
+        channels.push({ name: token, min, max });
+        i += 3;
+        continue;
+      }
+      i += 1;
+    }
+    return { channels, bike };
+  }
+  function scaleAdc(raw, min, max) {
+    if (!Number.isFinite(raw) || raw >= NO_PULSE) return NaN;
+    return min + raw / ADC_FULL_SCALE * (max - min);
+  }
+  function periodKmh(count, metresPerRev, pulses) {
+    if (!(count > 0) || count >= NO_PULSE || !(metresPerRev > 0)) return NaN;
+    const per = pulses > 0 ? pulses : 1;
+    return SPEED_CLOCK_HZ / count / per * metresPerRev * 3.6;
+  }
+  function displayName(channel, slot) {
+    const name = channel.name.trim() || "Channel";
+    if (slot === 0 && /^aps$/i.test(name)) return "APS Throttle";
+    return name;
+  }
+  function unitsFor(channel, slot) {
+    if (slot === 0 && /^(?:aps|tps)$|throttle|accelerat/i.test(channel.name)) return "%";
+    return "";
+  }
+  function smooth(values, radius) {
+    const out = new Array(values.length);
+    for (let i = 0; i < values.length; i++) {
+      let sum = 0;
+      let n = 0;
+      for (let k = Math.max(0, i - radius); k <= Math.min(values.length - 1, i + radius); k++) {
+        sum += values[k];
+        n += 1;
+      }
+      out[i] = n ? sum / n : 0;
+    }
+    return out;
+  }
+  function leanFromGps(points) {
+    const n = points.length;
+    const heading = new Array(n).fill(0);
+    for (let i = 1; i < n; i++) {
+      const prev = points[i - 1];
+      const curr = points[i];
+      const step = haversine(prev.lat, prev.lon, curr.lat, curr.lon);
+      if (step < 0.4) {
+        heading[i] = heading[i - 1];
+        continue;
+      }
+      const lat = prev.lat * Math.PI / 180;
+      const dLat = (curr.lat - prev.lat) * Math.PI / 180;
+      const dLon = (curr.lon - prev.lon) * Math.PI / 180 * Math.cos(lat);
+      heading[i] = Math.atan2(dLon, dLat);
+    }
+    const raw = new Array(n).fill(0);
+    for (let i = 1; i < n; i++) {
+      let d = heading[i] - heading[i - 1];
+      if (d > Math.PI) d -= 2 * Math.PI;
+      if (d < -Math.PI) d += 2 * Math.PI;
+      const dt = (points[i].t - points[i - 1].t) / 1e3;
+      const v = points[i].speed / 3.6;
+      if (dt <= 0.02 || v < 8) continue;
+      const deg = Math.atan(v * (d / dt) / G) * 180 / Math.PI;
+      raw[i] = Math.max(-65, Math.min(65, deg));
+    }
+    return smooth(raw, 2);
+  }
+  function longGFromGps(points) {
+    const raw = new Array(points.length).fill(0);
+    for (let i = 0; i < points.length; i++) {
+      const i0 = Math.max(0, i - 2);
+      const i1 = Math.min(points.length - 1, i + 2);
+      const dt = (points[i1].t - points[i0].t) / 1e3;
+      if (dt <= 0.05) continue;
+      const dv = (points[i1].speed - points[i0].speed) / 3.6;
+      raw[i] = Math.max(-2, Math.min(2, dv / dt / G));
+    }
+    return smooth(raw, 2);
+  }
+  function median(values) {
+    if (!values.length) return NaN;
+    const sorted = values.slice().sort((a, b) => a - b);
+    return sorted[Math.floor(sorted.length / 2)];
+  }
+  function isZhuhai(points) {
+    if (points.length < 3) return false;
+    const lat = median(points.map((point) => point.lat));
+    const lon = median(points.map((point) => point.lon));
+    return haversine(lat, lon, ZIC_CENTER.lat, ZIC_CENTER.lon) < 3e3;
+  }
+  function chooseGate(points, zhuhai) {
+    if (zhuhai) {
+      let best = null;
+      let bestD = Infinity;
+      for (const point of points) {
+        if (point.speed < 80) continue;
+        const d = haversine(point.lat, point.lon, ZIC_SF.lat, ZIC_SF.lon);
+        if (d < bestD) {
+          bestD = d;
+          best = point;
+        }
+      }
+      if (best && bestD < 80) return { lat: best.lat, lon: best.lon, radius: 20, minTravel: 3e3 };
+    }
+    const fast = points.find((point) => point.speed > 80);
+    if (!fast) return null;
+    return { lat: fast.lat, lon: fast.lon, radius: 25, minTravel: 2e3 };
+  }
+  function lapSpans(points, zhuhai) {
+    if (points.length < 2) return [];
+    const gate = chooseGate(points, zhuhai);
+    const hits = [];
+    if (gate) {
+      let travel = 0;
+      let outside = false;
+      for (let i = 1; i < points.length; i++) {
+        const prev = points[i - 1];
+        const curr = points[i];
+        const step = haversine(prev.lat, prev.lon, curr.lat, curr.lon);
+        if (step < 80) travel += step;
+        const fromGate = haversine(curr.lat, curr.lon, gate.lat, gate.lon);
+        if (travel > gate.minTravel * 0.45 && fromGate > gate.radius * 2) outside = true;
+        if (outside && travel > gate.minTravel && fromGate < gate.radius && curr.speed > 50) {
+          hits.push(i);
+          travel = 0;
+          outside = false;
+        }
+      }
+    }
+    if (hits.length >= 2) {
+      const spans = [];
+      for (let i = 0; i < hits.length - 1; i++) {
+        spans.push({ start: points[hits[i]].t, end: points[hits[i + 1]].t, complete: true });
+      }
+      return spans;
+    }
+    return [{ start: points[0].t, end: points[points.length - 1].t, complete: false }];
+  }
+  function parseSessions(text) {
+    const sessions = [];
+    let current = null;
+    const open = () => {
+      current = { rider: "", date: "", bike: null, channels: [], gps: [], rows: [], laps: [] };
+      sessions.push(current);
+    };
+    for (const raw of text.replace(/^\uFEFF/, "").split(/\r?\n/)) {
+      const line = raw.trim();
+      if (!line || line.startsWith("#")) continue;
+      if (line.startsWith("$NEW SESSION")) {
+        open();
+        continue;
+      }
+      if (!current || !line.startsWith("$")) continue;
+      const kind = line.slice(0, line.indexOf(",") > 0 ? line.indexOf(",") : line.length);
+      if (kind === "$DATE") {
+        current.date = parseDate(line.split(",")[1] ?? "");
+      } else if (kind === "$PILOTA") {
+        current.rider = (line.split(",")[1] ?? "").trim();
+      } else if (kind === "$SETTINGS") {
+        const parsed = parseSettings(line);
+        current.channels = parsed.channels;
+        current.bike = parsed.bike;
+      } else if (kind === "$GPS") {
+        const p = line.split(",");
+        const index = num(p[1]);
+        const fix = (p[2] ?? "").trim();
+        if (fix && fix.toUpperCase() !== "A") continue;
+        const lat = nmea(p[3] ?? "", (p[4] ?? "").trim());
+        const lon = nmea(p[5] ?? "", (p[6] ?? "").trim());
+        const knots = num(p[7]);
+        if (!Number.isFinite(index) || !Number.isFinite(lat) || !Number.isFinite(lon)) continue;
+        if (Math.abs(lat) > 90 || Math.abs(lon) > 180) continue;
+        const speed = Number.isFinite(knots) ? Math.max(0, knots) * KNOTS_TO_KMH : NaN;
+        if (!Number.isFinite(speed) || speed > 400) continue;
+        current.gps.push({ t: index, lat, lon, speed, alt: num(p[9]) });
+      } else if (kind === "$VALUE") {
+        const p = line.split(",");
+        const index = num(p[1]);
+        if (!Number.isFinite(index)) continue;
+        const cols = p.slice(2).map((token) => num(token));
+        if (cols.length && !Number.isFinite(cols[cols.length - 1])) cols.pop();
+        current.rows.push({ t: index, cols });
+      }
+    }
+    return sessions.filter((session) => session.gps.length >= 2 || session.rows.length >= 2);
+  }
+  function stampSessions(sessions) {
+    let timeline = 0;
+    for (const session of sessions) {
+      const indexes = [...session.gps.map((point) => point.t), ...session.rows.map((row) => row.t)];
+      if (!indexes.length) continue;
+      const min = Math.min(...indexes);
+      const max = Math.max(...indexes);
+      const shift = min * INDEX_MS < timeline ? timeline - min * INDEX_MS + INDEX_MS : 0;
+      for (const point of session.gps) point.t = point.t * INDEX_MS + shift;
+      for (const row of session.rows) row.t = row.t * INDEX_MS + shift;
+      timeline = max * INDEX_MS + shift + INDEX_MS;
+      session.gps.sort((a, b) => a.t - b.t);
+      session.rows.sort((a, b) => a.t - b.t);
+    }
+  }
+  function pushSample(series, t, value) {
+    if (!Number.isFinite(value)) return;
+    series.times.push(t);
+    series.values.push(value);
+  }
+  function finish(series) {
+    if (!series || series.times.length < 2) return null;
+    return [series.name, makeChannel(series.name, series.units, Float64Array.from(series.times), Float64Array.from(series.values))];
+  }
+  function rangeOf(values) {
+    let min = Infinity;
+    let max = -Infinity;
+    for (const value of values) {
+      if (value < min) min = value;
+      if (value > max) max = value;
+    }
+    return max - min;
+  }
+  function parseDat(text, fileName) {
+    if (!text.includes("$GPS")) throw new Error(EMPTY);
+    const sessions = parseSessions(text);
+    const gpsCount = sessions.reduce((sum, session) => sum + session.gps.length, 0);
+    if (gpsCount < 2) throw new Error(EMPTY);
+    stampSessions(sessions);
+    const allGps = sessions.flatMap((session) => session.gps);
+    const zhuhai = isZhuhai(allGps);
+    for (const session of sessions) session.laps = lapSpans(session.gps, zhuhai);
+    const complete = sessions.flatMap((session) => session.laps.filter((lap) => lap.complete));
+    const laps = (complete.length ? complete : sessions.flatMap((session) => session.laps)).filter((lap) => lap.end - lap.start >= 1e3).sort((a, b) => a.start - b.start);
+    const defs = sessions.find((session) => session.channels.length)?.channels ?? [];
+    const bike = sessions.find((session) => session.bike)?.bike ?? null;
+    const brakeNamed = defs.some((channel) => /freno|brake/i.test(channel.name));
+    const notes = [];
+    const series = /* @__PURE__ */ new Map();
+    const take = (name, units) => {
+      let built = series.get(name);
+      if (!built) {
+        built = { name, units, times: [], values: [] };
+        series.set(name, built);
+      }
+      return built;
+    };
+    const gpsSpeed = take("GPS Speed", "km/h");
+    const lat = take("GPS Latitude", "deg");
+    const lon = take("GPS Longitude", "deg");
+    const alt = take("GPS Altitude", "m");
+    for (const point of allGps) {
+      pushSample(gpsSpeed, point.t, point.speed);
+      pushSample(lat, point.t, point.lat);
+      pushSample(lon, point.t, point.lon);
+      pushSample(alt, point.t, point.alt);
+    }
+    const gpsLean = take("GPS Lean", "deg");
+    leanFromGps(allGps).forEach((value, index) => pushSample(gpsLean, allGps[index].t, value));
+    if (!brakeNamed) {
+      const gSeries = take("Longitudinal G", "G");
+      longGFromGps(allGps).forEach((value, index) => pushSample(gSeries, allGps[index].t, value));
+      notes.push("No channel is named brake. Longitudinal G is the change in GPS speed, negative while braking.");
+    }
+    const rear = bike && bike.rearMm > 200 && bike.rearMm < 4e3 ? take("Rear Speed", "km/h") : null;
+    const pinion = bike && bike.rearMm > 200 && bike.pinion >= 5 && bike.crown >= 5 ? take("Pinion Speed", "km/h") : null;
+    const rpm = take("RPM Period", "count");
+    const analogSeries = defs.slice(0, 8).map((channel, slot) => take(displayName(channel, slot), unitsFor(channel, slot)));
+    const extraSeries = defs.slice(8).map((channel) => take(channel.name.trim() || "Channel", ""));
+    for (const session of sessions) {
+      const sessionBike = session.bike ?? bike;
+      for (const row of session.rows) {
+        const cols = row.cols;
+        if (rear && sessionBike) {
+          pushSample(rear, row.t, periodKmh(cols[REAR_AT] ?? NaN, sessionBike.rearMm / 1e3, sessionBike.pulses2));
+        }
+        if (pinion && sessionBike) {
+          const metres = sessionBike.rearMm / 1e3 * (sessionBike.pinion / sessionBike.crown);
+          pushSample(pinion, row.t, periodKmh(cols[PINION_AT] ?? NaN, metres, sessionBike.pulses1));
+        }
+        const period = cols[RPM_AT] ?? NaN;
+        if (period > 0 && period < NO_PULSE) pushSample(rpm, row.t, period);
+        defs.slice(0, 8).forEach((channel, slot) => {
+          const at = ANALOG_AT[slot];
+          if (at == null) return;
+          pushSample(analogSeries[slot], row.t, scaleAdc(cols[at] ?? NaN, channel.min, channel.max));
+        });
+        defs.slice(8).forEach((channel, slot) => {
+          const at = EXTRA_AT[slot];
+          if (at == null) return;
+          pushSample(extraSeries[slot], row.t, scaleAdc(cols[at] ?? NaN, channel.min, channel.max));
+        });
+      }
+    }
+    let useLoggedLean = false;
+    for (const channel of defs.slice(8)) {
+      const built = series.get(channel.name.trim());
+      if (!built) continue;
+      if (/lean|pitch/i.test(channel.name) && rangeOf(built.values) < 1) {
+        series.delete(channel.name.trim());
+        notes.push(`Logged ${channel.name.trim()} does not move, so it is left out.`);
+        continue;
+      }
+      if (/lean/i.test(channel.name) && rangeOf(built.values) >= 1) useLoggedLean = true;
+    }
+    if (!useLoggedLean) {
+      const derived = series.get("GPS Lean");
+      if (derived) {
+        derived.name = "Lean Angle";
+        series.set("Lean Angle", derived);
+      }
+      notes.push("Lean Angle is derived from GPS speed and heading, positive to the right.");
+    }
+    series.delete("GPS Lean");
+    notes.push("RPM Period is the engine pulse period in timer counts, not rpm.");
+    if (rear) notes.push("Rear Speed converts the wheel-speed period with the circumference in $SETTINGS and a 39062.5 Hz timer.");
+    if (pinion) notes.push("Pinion Speed uses that timer with the sprocket ratio in $SETTINGS.");
+    const channels = {};
+    const order = [
+      "GPS Speed",
+      "GPS Latitude",
+      "GPS Longitude",
+      "GPS Altitude",
+      "Lean Angle",
+      "Longitudinal G",
+      "Rear Speed",
+      "Pinion Speed",
+      ...analogSeries.map((item) => item.name),
+      ...extraSeries.map((item) => item.name),
+      "RPM Period"
+    ];
+    for (const name of order) {
+      const built = finish(series.get(name) ?? null);
+      if (built && !channels[built[0]]) channels[built[0]] = built[1];
+    }
+    const first = sessions.find((session) => session.gps.length) ?? sessions[0];
+    const tod = parseTod(
+      text.split(/\r?\n/).find((line) => line.startsWith("$GPS,"))?.split(",")[8] ?? ""
+    );
+    const rider = sessions.map((session) => session.rider).find(Boolean) ?? "";
+    const stem = fileName.replace(/^.*[\\/]/, "").replace(/\.[^.]+$/, "") || "Session";
+    const xrkLaps = laps.map((lap, index) => ({
+      num: index + 1,
+      startTime: lap.start,
+      endTime: lap.end
+    }));
+    return {
+      channels,
+      laps: xrkLaps,
+      metadata: {
+        Vehicle: "I2M Chrome",
+        Driver: rider,
+        Venue: zhuhai ? "Zhuhai International Circuit" : stem,
+        "Log Date": first.date,
+        "Log Time": tod,
+        Source: "I2M DAT",
+        "Speed Unit": "knots, converted to km/h",
+        Notes: notes.join(" ")
+      }
+    };
+  }
+
   // src/lib/speedangle.ts
   var SAMPLE_MS = 100;
   var MPH_TO_KMH = 1.609344;
   var G_COUNTS_PER_G = 50;
-  function makeChannel(name, units, timecodes, values) {
+  function makeChannel2(name, units, timecodes, values) {
     return {
       name,
       shortName: name,
@@ -1977,8 +2447,8 @@ td .d{display:block;font-size:.72rem;font-weight:650}
       nums.push(value);
     }
     const mark = parts[10];
-    const finish = /^f(?:l|inish)?$/i.test(mark);
-    if (!finish && !/^\d+$/.test(mark)) return null;
+    const finish2 = /^f(?:l|inish)?$/i.test(mark);
+    if (!finish2 && !/^\d+$/.test(mark)) return null;
     return {
       lat,
       lon,
@@ -1990,7 +2460,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
       prevAngle: nums[5],
       sats: nums[6],
       valid: nums[7],
-      finish
+      finish: finish2
     };
   }
   function traceRun(lines) {
@@ -2141,7 +2611,7 @@ td .d{display:block;font-size:.72rem;font-weight:650}
     const add = (name, units, values) => {
       const series = finiteSeries(values);
       if (!series) return;
-      channels[name] = makeChannel(name, units, times, series);
+      channels[name] = makeChannel2(name, units, times, series);
     };
     add(
       "GPS Speed",
@@ -2643,7 +3113,7 @@ ${cursor}
     const list = [...channels];
     return list.find((ch) => ch.name === "GPS Longitude") ?? list.find((ch) => isGpsPositionName(ch.name) && (/lon/i.test(ch.name) || /long/i.test(ch.name)));
   }
-  function haversine(lat1, lon1, lat2, lon2) {
+  function haversine2(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const toR = Math.PI / 180;
     const dLat = (lat2 - lat1) * toR;
@@ -2665,7 +3135,7 @@ ${cursor}
       if (Math.abs(la) < 0.01 && Math.abs(lo) < 0.01) continue;
       const t = lat[i].t;
       if (hasPrev) {
-        const step = haversine(prevLat, prevLon, la, lo);
+        const step = haversine2(prevLat, prevLon, la, lo);
         if (step > 80) continue;
         acc += step;
       }
@@ -2755,7 +3225,7 @@ ${cursor}
       { id: "C11", fromM: 3625, toM: 3941, apexM: 3841, brakeM: 3625, turn: "RIGHT", apexMode: "speed" }
     ]
   };
-  function median(values) {
+  function median2(values) {
     if (!values.length) return 0;
     const sorted = [...values].sort((a, b) => a - b);
     return sorted[Math.floor((sorted.length - 1) / 2)];
@@ -3225,7 +3695,7 @@ ${cursor}
     }
     return out;
   }
-  function haversine2(lat1, lon1, lat2, lon2) {
+  function haversine3(lat1, lon1, lat2, lon2) {
     const R = 6371e3;
     const toR = Math.PI / 180;
     const dLat = (lat2 - lat1) * toR;
@@ -3233,7 +3703,7 @@ ${cursor}
     const a = Math.sin(dLat / 2) ** 2 + Math.cos(lat1 * toR) * Math.cos(lat2 * toR) * Math.sin(dLon / 2) ** 2;
     return 2 * R * Math.asin(Math.min(1, Math.sqrt(a)));
   }
-  function profileFromPoints(num, startMs, endMs, duration, times, dist, source, path = []) {
+  function profileFromPoints(num2, startMs, endMs, duration, times, dist, source, path = []) {
     if (times.length < 2 || dist[dist.length - 1] < 50) return null;
     const total = dist[dist.length - 1];
     if (times[0] > 0.05) {
@@ -3244,12 +3714,12 @@ ${cursor}
       times.push(duration);
       dist.push(total);
     }
-    return { num, startMs, endMs, duration, times, dist, total, source, side: "A", id: `A${num}`, path };
+    return { num: num2, startMs, endMs, duration, times, dist, total, source, side: "A", id: `A${num2}`, path };
   }
-  function profileFromGps(num, startMs, endMs, duration, lat, lon) {
+  function profileFromGps(num2, startMs, endMs, duration, lat, lon) {
     const path = gpsTrack(lat, lon);
     return profileFromPoints(
-      num,
+      num2,
       startMs,
       endMs,
       duration,
@@ -3259,7 +3729,7 @@ ${cursor}
       path
     );
   }
-  function profileFromSpeed(num, startMs, endMs, duration, speed, rawIsMs) {
+  function profileFromSpeed(num2, startMs, endMs, duration, speed, rawIsMs) {
     if (speed.length < 2) return null;
     const times = [speed[0].t];
     const dist = [0];
@@ -3273,7 +3743,7 @@ ${cursor}
       times.push(speed[i].t);
       dist.push(acc);
     }
-    return profileFromPoints(num, startMs, endMs, duration, times, dist, "speed");
+    return profileFromPoints(num2, startMs, endMs, duration, times, dist, "speed");
   }
   var NAMED = [
     [/twist[\s_-]*grip/i, "Throttle Twist Grip"],
@@ -3303,7 +3773,7 @@ ${cursor}
     if (func && !generic.test(func)) return func;
     return name || func || "Channel";
   }
-  function makeChannel2(name, units, func, timecodes, values) {
+  function makeChannel3(name, units, func, timecodes, values) {
     return {
       name,
       shortName: name,
@@ -3387,9 +3857,9 @@ ${cursor}
       let start = gate;
       let outside = false;
       for (let i = gate + 1; i < n; i++) {
-        const step = haversine2(lat[i - 1], lon[i - 1], lat[i], lon[i]);
+        const step = haversine3(lat[i - 1], lon[i - 1], lat[i], lon[i]);
         if (step < 80) travel += step;
-        const fromGate = haversine2(lat[i], lon[i], lat[gate], lon[gate]);
+        const fromGate = haversine3(lat[i], lon[i], lat[gate], lon[gate]);
         if (travel > 2e3 && fromGate > 25) outside = true;
         if (outside && travel > 2e3 && fromGate < 25 && speed[i] > 40) {
           laps.push({ num: laps.length + 1, startTime: times[start], endTime: times[i] });
@@ -3402,12 +3872,12 @@ ${cursor}
     if (!laps.length) laps.push({ num: 1, startTime: times[0], endTime: times[n - 1] });
     const track = fileName.replace(/\.[^.]+$/, "").split("_").slice(3).join(" ").trim();
     const channels = {
-      "GPS Speed": makeChannel2("GPS Speed", "km/h", "GPS Speed", times, Float64Array.from(speed)),
-      "GPS Latitude": makeChannel2("GPS Latitude", "deg", "GPS Latitude", times, lat),
-      "GPS Longitude": makeChannel2("GPS Longitude", "deg", "GPS Longitude", times, lon),
-      Heading: makeChannel2("Heading", "deg", "Heading", times, Float64Array.from(heading)),
-      Height: makeChannel2("Height", "m", "Height", times, Float64Array.from(height)),
-      Satellites: makeChannel2("Satellites", "", "Satellites", times, Float64Array.from(sats))
+      "GPS Speed": makeChannel3("GPS Speed", "km/h", "GPS Speed", times, Float64Array.from(speed)),
+      "GPS Latitude": makeChannel3("GPS Latitude", "deg", "GPS Latitude", times, lat),
+      "GPS Longitude": makeChannel3("GPS Longitude", "deg", "GPS Longitude", times, lon),
+      Heading: makeChannel3("Heading", "deg", "Heading", times, Float64Array.from(heading)),
+      Height: makeChannel3("Height", "m", "Height", times, Float64Array.from(height)),
+      Satellites: makeChannel3("Satellites", "", "Satellites", times, Float64Array.from(sats))
     };
     return {
       channels,
@@ -3537,8 +4007,8 @@ ${cursor}
     const all = everyLap();
     if (all.length < 2) return all;
     const totals = all.map((l) => l.total).sort((a, b) => a - b);
-    const median2 = totals[Math.floor((totals.length - 1) / 2)] || 1;
-    const full = all.filter((l) => l.total >= median2 * 0.85);
+    const median3 = totals[Math.floor((totals.length - 1) / 2)] || 1;
+    const full = all.filter((l) => l.total >= median3 * 0.85);
     return full.length ? full : all;
   }
   function loadTemplates() {
@@ -3566,7 +4036,7 @@ ${cursor}
   function rulerLength() {
     const pool = comparedLaps();
     const laps = pool.length ? pool : everyLap();
-    return median(laps.map((lap) => lap.total));
+    return median2(laps.map((lap) => lap.total));
   }
   function applyTemplateId(id) {
     if (id === "manual") {
@@ -3825,7 +4295,7 @@ File B: ${state.compare.fileName}` : ""}`,
     if (!log) {
       app.innerHTML = `<header class="bar"><h1>Sim Motorsport Data</h1><button id="open">Open file</button></header>
       <main class="empty"><h2>A coach desk for the lap</h2>
-      <p>Open an AIM .xrk, a Dragy .vbo, or a SpeedAngle .sa. Apply the ZIC C1\u2013C11 template, or drop your own splits. The ideal time is the sum of the fastest pass through each sector.</p>
+      <p>Open an AIM .xrk, a Dragy .vbo, a SpeedAngle .sa, or an I2M Chrome / DataLog .dat. Apply the ZIC C1\u2013C11 template, or drop your own splits. The ideal time is the sum of the fastest pass through each sector.</p>
       <button id="open2">Choose a file</button></main>`;
       document.getElementById("open").onclick = pick;
       document.getElementById("open2").onclick = pick;
@@ -5011,7 +5481,7 @@ File B: ${state.compare.fileName}` : ""}`,
   }
   var picker = document.createElement("input");
   picker.type = "file";
-  picker.accept = ".xrk,.xrz,.vbo,.sa";
+  picker.accept = ".xrk,.xrz,.vbo,.sa,.dat";
   picker.style.display = "none";
   document.body.appendChild(picker);
   var pickTarget = "A";
@@ -5024,7 +5494,7 @@ File B: ${state.compare.fileName}` : ""}`,
     try {
       const buf = await file.arrayBuffer();
       const lower = file.name.toLowerCase();
-      const parsed = lower.endsWith(".vbo") ? parseVbo(new TextDecoder().decode(buf), file.name) : lower.endsWith(".sa") ? parseSa(new TextDecoder().decode(buf), file.name) : parseXrk(new Uint8Array(buf));
+      const parsed = lower.endsWith(".vbo") ? parseVbo(new TextDecoder().decode(buf), file.name) : lower.endsWith(".sa") ? parseSa(new TextDecoder().decode(buf), file.name) : lower.endsWith(".dat") ? parseDat(new TextDecoder().decode(buf), file.name) : parseXrk(new Uint8Array(buf));
       const prepared = prepare(parsed, file.name, target);
       if (!prepared.laps.length) {
         alert("No laps with a usable distance trace were found.");

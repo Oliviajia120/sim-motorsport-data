@@ -25,7 +25,7 @@ Channels from a Zhuhai Chrome log:
 | --- | --- |
 | GPS Speed, latitude, longitude, altitude | 10 Hz fixes. Speed was knots. |
 | APS Throttle | First `$SETTINGS` channel, here accelerator position. 0 V is the minimum and count 1023 is the maximum, so count 200 with max 512 is 100%. |
-| TPS H, TPS V, 2ANALOG, 3ANALOG, 4ANALOG, LAMBDA INT., 6ANALOG | Same 0–5 V scaling, under the name and min/max stored in the file. TPS H/V are not the grip trace. 2ANALOG’s minimum is −900, so its scaled values stay negative. 3ANALOG sits near one count. |
+| TPS H, TPS V, 2ANALOG, 3ANALOG, 4ANALOG, LAMBDA INT., 6ANALOG | Same 0–5 V scaling, under the name and min/max stored in the file. TPS H/V are not the grip trace. 2ANALOG spans −900 to 123, so a mid-scale count is still largely negative (count 582 is −318) and full scale is only 123. 3ANALOG sits near one count. |
 | Rear Speed | Wheel-speed period (column 4) with the 1950 mm circumference and a 39062.5 Hz timer. It tracks GPS within about 1 km/h. |
 | Pinion Speed | Column 3 through the 16/38 sprockets. A few percent faster than GPS on this bike. |
 | RPM Period | Column 5, raw timer counts. The file has no engine timebase, so this is not rpm. It is high when the bike is slow. |
