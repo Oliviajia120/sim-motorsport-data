@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { parseXrk } from "aim-xrk";
+import { parseDat } from "@/lib/i2m-dat";
 import { parseSa } from "@/lib/speedangle";
 import { Flag, MousePointer2, Plus, RotateCcw, Upload } from "lucide-react";
 import { DeltaPlot, TracePlot, type PlotMarker } from "@/components/trace-plot";
@@ -221,7 +222,9 @@ export function Viewer() {
       const lower = file.name.toLowerCase();
       const parsed = lower.endsWith(".sa")
         ? parseSa(new TextDecoder().decode(buf), file.name)
-        : parseXrk(new Uint8Array(buf));
+        : lower.endsWith(".dat")
+          ? parseDat(new TextDecoder().decode(buf), file.name)
+          : parseXrk(new Uint8Array(buf));
       const prepared = prepareLog(parsed, file.name);
       if (!prepared.laps.length) {
         setError("No laps with a usable distance trace were found in this file.");
@@ -410,7 +413,7 @@ export function Viewer() {
         <input
           ref={inputRef}
           type="file"
-          accept=".xrk,.xrz,.sa"
+          accept=".xrk,.xrz,.sa,.dat"
           className="hidden"
           onChange={(event) => {
             const file = event.target.files?.[0];
@@ -422,7 +425,7 @@ export function Viewer() {
           {status ??
             (log
               ? `${log.fileName}  ·  ${log.rider !== "—" ? `${log.rider}  ·  ` : ""}${log.vehicle}  ·  ${log.track}`
-              : "AIM or SpeedAngle session")}
+              : "AIM, SpeedAngle, or I2M session")}
         </p>
       </header>
 
@@ -432,8 +435,8 @@ export function Viewer() {
         <main className="mx-auto flex max-w-xl flex-1 flex-col justify-center gap-4 px-6 py-16">
           <h2 className="text-3xl font-semibold tracking-tight">A coach desk for the lap</h2>
           <p className="text-base leading-relaxed text-muted">
-            Open a session, apply the ZIC C1–C11 corners or drop your own splits, and compare where a lap
-            gains and loses time.
+            Open an AIM, SpeedAngle, or I2M Chrome .dat session, apply the ZIC C1–C11 corners or drop your
+            own splits, and compare where a lap gains and loses time.
           </p>
           <button
             type="button"
