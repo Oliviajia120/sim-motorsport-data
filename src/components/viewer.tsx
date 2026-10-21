@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useState, type PointerEvent } from "react";
 import { parseXrk } from "aim-xrk";
+import { parseSa } from "@/lib/speedangle";
 import { Flag, MousePointer2, Plus, RotateCcw, Upload } from "lucide-react";
 import { DeltaPlot, TracePlot, type PlotMarker } from "@/components/trace-plot";
 import { downloadCoachingNote, safeStem, type CoachingNote, type NoteChart } from "@/lib/coaching-note";
@@ -217,7 +218,10 @@ export function Viewer() {
       const buf = await file.arrayBuffer();
       setStatus("Parsing…");
       await new Promise((resolve) => setTimeout(resolve, 0));
-      const parsed = parseXrk(new Uint8Array(buf));
+      const lower = file.name.toLowerCase();
+      const parsed = lower.endsWith(".sa")
+        ? parseSa(new TextDecoder().decode(buf), file.name)
+        : parseXrk(new Uint8Array(buf));
       const prepared = prepareLog(parsed, file.name);
       if (!prepared.laps.length) {
         setError("No laps with a usable distance trace were found in this file.");
@@ -227,6 +231,7 @@ export function Viewer() {
       }
       const coach = coachingChannelKeys(prepared.channels);
       const defaults = [coach.brake, coach.throttle, coach.lean].filter((key): key is string => !!key);
+      if (!coach.throttle && coach.speed && !defaults.includes(coach.speed)) defaults.push(coach.speed);
       setSelectedKeys(defaults.length ? defaults : prepared.channels.slice(0, 3).map((ch) => ch.key));
       const quickest = fastest(prepared.laps).duration;
       const flying = prepared.laps.filter((lap) => lap.duration < quickest * 1.12);
@@ -400,12 +405,12 @@ export function Viewer() {
           onClick={() => inputRef.current?.click()}
         >
           <Upload className="size-4" aria-hidden="true" />
-          Open .xrk
+          Open file
         </button>
         <input
           ref={inputRef}
           type="file"
-          accept=".xrk,.xrz"
+          accept=".xrk,.xrz,.sa"
           className="hidden"
           onChange={(event) => {
             const file = event.target.files?.[0];
@@ -417,7 +422,7 @@ export function Viewer() {
           {status ??
             (log
               ? `${log.fileName}  ·  ${log.rider !== "—" ? `${log.rider}  ·  ` : ""}${log.vehicle}  ·  ${log.track}`
-              : "AIM Solo session")}
+              : "AIM or SpeedAngle session")}
         </p>
       </header>
 
